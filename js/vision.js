@@ -846,12 +846,21 @@ export function latticeExtent(ink, w, h, cell, threshold = 0.22, window = 2) {
  * indices de lignes (bas/gauche), coin vide (haut/gauche) et grille de jeu
  * (bas/droite, vide elle aussi). On retient la coupure qui maximise ce
  * contraste.
+ *
+ * À contraste comparable, une coupure donnant des côtés multiples de cinq est
+ * préférée : les grilles publiées le sont presque toujours, puisqu'elles sont
+ * tracées avec un trait épais tous les cinq carreaux. La préférence n'est pas
+ * une obligation — une grille tracée à la main peut avoir n'importe quelle
+ * taille — d'où un repli sur la meilleure coupure sans contrainte quand
+ * celle-ci est nettement plus nette.
  */
 export function findSplit(dens, rows, cols, minPuzzle = 4) {
   const ii = integral(dens, cols, rows);
   const mean = (c0, r0, c1, r1) =>
     boxSum(ii, cols, c0, r0, c1, r1) / Math.max(1, (c1 - c0) * (r1 - r0));
+
   let best = null;
+  let bestRound = null;
   for (let sc = 1; sc <= cols - minPuzzle; sc++) {
     for (let sr = 1; sr <= rows - minPuzzle; sr++) {
       const tl = mean(0, 0, sc, sr);
@@ -859,10 +868,18 @@ export function findSplit(dens, rows, cols, minPuzzle = 4) {
       const bl = mean(0, sr, sc, rows);
       const br = mean(sc, sr, cols, rows);
       const score = tr + bl - 3 * (tl + br);
-      if (!best || score > best.score) best = { sc, sr, score, tl, tr, bl, br };
+      const candidate = { sc, sr, score, tl, tr, bl, br };
+      if (!best || score > best.score) best = candidate;
+      if ((cols - sc) % 5 === 0 && (rows - sr) % 5 === 0) {
+        if (!bestRound || score > bestRound.score) bestRound = candidate;
+      }
     }
   }
-  return best;
+  if (!best) return null;
+  if (!bestRound) return best;
+  // Le seuil laisse passer la coupure ronde tant qu'elle reste du même ordre.
+  const margin = Math.abs(best.score) * 0.25;
+  return bestRound.score >= best.score - margin ? bestRound : best;
 }
 
 /**
