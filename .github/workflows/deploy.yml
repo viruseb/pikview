@@ -26,6 +26,10 @@ jobs:
       - name: Regenerate icons
         run: node tools/make-icons.mjs
 
+      # Le corpus de photos de test n'a rien à faire sur le site publié.
+      - name: Drop test corpus
+        run: rm -rf tests
+
       - name: Upload site
         uses: actions/upload-pages-artifact@v3
         with:

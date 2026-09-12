@@ -1,0 +1,33 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Pikview — banc de test</title>
+<script type="module">
+import * as vision from '../js/vision.js';
+import * as ocr from '../js/ocr.js';
+import { analyzePhoto } from '../js/analyze.js';
+
+let worker = null;
+
+window.runPipeline = async (url) => {
+  const img = new Image();
+  img.crossOrigin = 'anonymous';
+  img.src = url;
+  await img.decode();
+  const res = await analyzePhoto(img, {
+    ocr,
+    getWorker: async () => (worker ||= await ocr.getWorker()),
+  });
+  return {
+    error: res.error || null,
+    rows: res.rows ?? 0,
+    cols: res.cols ?? 0,
+    clueRows: res.split ? res.split.sr : 0,
+    clueCols: res.split ? res.split.sc : 0,
+    rowClues: res.rowClues || [],
+    colClues: res.colClues || [],
+    doubtRows: [...(res.doubtRows || [])],
+    doubtCols: [...(res.doubtCols || [])],
+  };
+};
+</script>
+<p>Page de support du banc de test (<code>node tests/bench.mjs</code>).</p>

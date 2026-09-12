@@ -77,7 +77,15 @@ export function adaptiveThreshold(gray, w, h, radius, delta = 10) {
   return ink;
 }
 
-/** Estime l'inclinaison globale du document (radians), entre -6° et +6°. */
+/**
+ * Estime l'inclinaison globale du document (radians), entre -6° et +6°.
+ *
+ * Conservé pour mémoire, mais plus utilisé par la chaîne d'analyse : sur une
+ * photo de page réelle le score est trop plat (moins de 3 % d'écart entre le
+ * pic et le plateau) pour départager un angle, et un redressement approximatif
+ * dégrade la détection au lieu de l'aider. Les traits sont désormais suivis à
+ * leur pente locale, ce qui rend l'opération inutile.
+ */
 export function estimateSkew(ink, w, h) {
   const step = Math.max(1, Math.round(Math.max(w, h) / 500));
   const sw = Math.ceil(w / step);
@@ -92,8 +100,12 @@ export function estimateSkew(ink, w, h) {
   let bestScore = -1;
   for (let deg = -6; deg <= 6; deg += 0.25) {
     const t = Math.tan((deg * Math.PI) / 180);
-    const off = t < 0 ? Math.ceil(-t * sw) : 0;
-    const proj = new Float64Array(sh + Math.ceil(Math.abs(t) * sw) + 2);
+    // Le décalage doit compenser les indices négatifs, qui n'apparaissent que
+    // pour une pente positive : sans lui, une partie de l'encre tombe hors de
+    // l'accumulateur et le score favorise arbitrairement un côté.
+    const spread = Math.ceil(Math.abs(t) * sw);
+    const off = t > 0 ? spread : 0;
+    const proj = new Float64Array(sh + spread + 2);
     for (let y = 0; y < sh; y++) {
       for (let x = 0; x < sw; x++) {
         if (small[y * sw + x]) proj[(y - t * x + off) | 0]++;
@@ -135,53 +147,78 @@ function median(arr) {
 
 /**
  * Cherche, dans chaque bande, les positions transversales des traits longs.
+ *
+ * Chaque bande est examinée sous plusieurs pentes : une photo prise de biais
+ * incline les traits de plusieurs degrés, et un trait incliné ne forme aucune
+ * suite horizontale continue. Le redressement global de la page ne peut pas y
+ * suppléer — sur une page bombée aucun angle unique ne convient, et le score
+ * d'inclinaison est trop plat pour être fiable. On mesure donc la pente
+ * localement, là où le trait est quasi droit.
+ *
  * @param {boolean} horizontal true pour les traits horizontaux (bandes verticales)
  * @returns {{centers:number[], peaks:number[][]}}
  */
-function stripPeaks(ink, w, h, horizontal, strips) {
+function stripPeaks(ink, w, h, horizontal, strips, runFactor) {
   const along = horizontal ? w : h;   // direction du trait
   const across = horizontal ? h : w;  // direction de la projection
   const stripW = along / strips;
-  const minRun = Math.max(10, stripW * 0.7);
+  const minRun = Math.max(10, stripW * runFactor);
   const at = horizontal
-    ? (pos, cr) => ink[cr * w + pos]
-    : (pos, cr) => ink[pos * w + cr];
+    ? (pos, cr) => (cr >= 0 && cr < across ? ink[cr * w + pos] : 0)
+    : (pos, cr) => (cr >= 0 && cr < across ? ink[pos * w + cr] : 0);
 
+  const SHEARS = [-0.1, -0.075, -0.05, -0.025, 0, 0.025, 0.05, 0.075, 0.1];
   const centers = [];
   const peaks = [];
+
   for (let s = 0; s < strips; s++) {
     const a0 = Math.floor(s * stripW);
     const a1 = Math.min(along, Math.ceil((s + 1) * stripW));
-    centers.push((a0 + a1) / 2);
-    const proj = new Float64Array(across);
-    for (let cr = 0; cr < across; cr++) {
-      let b = a0;
-      let total = 0;
-      while (b < a1) {
-        if (!at(b, cr)) { b++; continue; }
-        const start = b;
-        let last = b;
-        let gap = 0;
+    const mid = (a0 + a1) / 2;
+    centers.push(mid);
+
+    let best = null;
+    for (const shear of SHEARS) {
+      const proj = new Float64Array(across);
+      for (let cr = 0; cr < across; cr++) {
+        let b = a0;
+        let total = 0;
         while (b < a1) {
-          if (at(b, cr)) { last = b; gap = 0; }
-          else if (++gap > 2) break;
-          b++;
+          if (!at(b, Math.round(cr + shear * (b - mid)))) { b++; continue; }
+          const start = b;
+          let last = b;
+          let gap = 0;
+          while (b < a1) {
+            if (at(b, Math.round(cr + shear * (b - mid)))) { last = b; gap = 0; }
+            else if (++gap > 2) break;
+            b++;
+          }
+          if (last - start + 1 >= minRun) total += last - start + 1;
+          b = last + 2;
         }
-        if (last - start + 1 >= minRun) total += last - start + 1;
-        b = last + 2;
+        proj[cr] = total;
       }
-      proj[cr] = total;
+      let score = 0;
+      for (const v of proj) score += v * v;
+      if (!best || score > best.score) best = { score, proj };
     }
+
+    // Le seuil ne discrimine rien de plus que la longueur minimale déjà
+    // exigée — la projection ne cumule que des segments qui l'atteignent, elle
+    // vaut donc zéro ou davantage. La condition est écrite en négatif à
+    // dessein : une valeur non comparable doit faire avancer l'indice, faute
+    // de quoi la boucle tourne sans fin.
     const threshold = minRun * 0.85;
     const found = [];
     let i = 0;
     while (i < across) {
-      if (proj[i] < threshold) { i++; continue; }
+      if (!(best.proj[i] >= threshold)) { i++; continue; }
       let j = i;
       let sum = 0;
       let wsum = 0;
-      while (j < across && proj[j] >= threshold) { sum += proj[j]; wsum += proj[j] * j; j++; }
-      found.push(wsum / sum);
+      while (j < across && best.proj[j] >= threshold) { sum += best.proj[j]; wsum += best.proj[j] * j; j++; }
+      if (j === i) { i++; continue; }
+      if (sum > 0) found.push(wsum / sum);
       i = j;
     }
     peaks.push(found);
@@ -260,13 +297,20 @@ function meanOf(values) {
 
 /**
  * Détecte le maillage complet du tableau.
+ * Le nombre de bandes compte, et pas leur coût : le travail total vaut la
+ * surface de l'image par le nombre de pentes essayées, quelle que soit la
+ * découpe. Des bandes étroites exigent des segments plus courts, ce qui
+ * rattrape les traits que les chiffres d'un bloc d'indices dense
+ * interrompent — sur les grilles serrées, passer de douze à vingt bandes
+ * double presque le nombre de traits retrouvés.
+ *
  * @returns {null|{hLines:Float64Array[], vLines:Float64Array[], sampleX:number[],
  *                 sampleY:number[], rows:number, cols:number,
  *                 pitchX:number, pitchY:number, nodes:Float64Array}}
  */
-export function detectMesh(ink, w, h, strips = 12) {
-  const hRaw = stripPeaks(ink, w, h, true, strips);
-  const vRaw = stripPeaks(ink, w, h, false, strips);
+export function detectMesh(ink, w, h, strips = 20, runFactor = 0.45) {
+  const hRaw = stripPeaks(ink, w, h, true, strips, runFactor);
+  const vRaw = stripPeaks(ink, w, h, false, strips, runFactor);
 
   const gaps = (list) => {
     const out = [];
@@ -294,29 +338,65 @@ export function detectMesh(ink, w, h, strips = 12) {
       }
     }
     // Pas réel, mesuré entre traits voisins.
+    const positions = merged.map((t) => meanOf(t.values));
     const realGaps = [];
-    for (let i = 1; i < merged.length; i++) {
-      realGaps.push(meanOf(merged[i].values) - meanOf(merged[i - 1].values));
-    }
+    for (let i = 1; i < positions.length; i++) realGaps.push(positions[i] - positions[i - 1]);
     const small = realGaps.filter((d) => d <= median(realGaps) * 1.6);
-    const step = median(small.length ? small : realGaps) || pitch;
-    // Insère les traits manqués.
+    let step = median(small.length ? small : realGaps) || pitch;
+
+    // Ne garder que la plus longue suite régulièrement espacée.
+    //
+    // Le bord de la page, une ombre, un doigt au premier plan produisent des
+    // traits bien nets hors du tableau. Sans ce filtre, l'étape suivante les
+    // relie au quadrillage en comblant l'écart, et le maillage déborde sur
+    // toute la photo. Un écart n'est accepté que s'il vaut une à trois fois le
+    // pas : de quoi tolérer un trait pâle manqué, pas de quoi franchir une
+    // marge blanche.
+    //
+    // Le pas est comparé à une estimation glissante, pas à une valeur unique :
+    // vue de biais, une page voit son pas dériver d'un bout à l'autre, et un
+    // seuil global finirait par couper la suite en plein milieu du tableau.
+    const runs = [[0]];
+    let localStep = step;
+    for (let i = 1; i < positions.length; i++) {
+      const gap = positions[i] - positions[i - 1];
+      const k = Math.round(gap / localStep);
+      if (k >= 1 && k <= 3 && Math.abs(gap / k - localStep) < localStep * 0.18) {
+        runs[runs.length - 1].push(i);
+        localStep = localStep * 0.7 + (gap / k) * 0.3;
+      } else {
+        runs.push([i]);
+        localStep = step;
+      }
+    }
+    const best = runs.reduce((a, b) => (b.length > a.length ? b : a));
+    const kept = best.length >= 4 ? best.map((i) => merged[i]) : merged;
+    if (kept.length >= 4) {
+      const keptGaps = [];
+      for (let i = 1; i < kept.length; i++) {
+        keptGaps.push(meanOf(kept[i].values) - meanOf(kept[i - 1].values));
+      }
+      const keptSmall = keptGaps.filter((d) => d <= median(keptGaps) * 1.6);
+      step = median(keptSmall.length ? keptSmall : keptGaps) || step;
+    }
+
+    // Insère les traits manqués à l'intérieur de la suite retenue.
     const full = [];
-    for (let i = 0; i < merged.length; i++) {
+    for (let i = 0; i < kept.length; i++) {
       if (i > 0) {
-        const gap = meanOf(merged[i].values) - meanOf(merged[i - 1].values);
+        const gap = meanOf(kept[i].values) - meanOf(kept[i - 1].values);
         const k = Math.max(1, Math.round(gap / step));
         if (k > 1 && Math.abs(gap / k - step) < step * 0.35) {
           for (let t = 1; t < k; t++) {
             const values = new Float64Array(strips);
             for (let s = 0; s < strips; s++) {
-              values[s] = merged[i - 1].values[s] + ((merged[i].values[s] - merged[i - 1].values[s]) * t) / k;
+              values[s] = kept[i - 1].values[s] + ((kept[i].values[s] - kept[i - 1].values[s]) * t) / k;
             }
             full.push({ values });
           }
         }
       }
-      full.push(merged[i]);
+      full.push(kept[i]);
     }
     return { lines: full.map((t) => t.values), step };
   };
@@ -377,6 +457,74 @@ function computeNodes(mesh) {
   return nodes;
 }
 
+/**
+ * Aplatit la photo d'après un maillage : chaque case du maillage est
+ * rééchantillonnée vers une case carrée de `cell` pixels.
+ *
+ * L'intérêt n'est pas cosmétique. Une détection par bandes ne rassemble, pour
+ * un trait donné, qu'une fraction de sa longueur à la fois — assez pour un
+ * trait franc, trop peu pour les traits gris pâle d'une grille imprimée. Une
+ * fois la page aplatie, un trait horizontal l'est sur toute la largeur : une
+ * seconde détection accumule alors la preuve d'un bout à l'autre et retrouve
+ * les traits que la première avait manqués.
+ *
+ * Le maillage de départ n'a donc pas besoin d'être complet, seulement d'être
+ * juste là où il existe : il ne sert qu'à décrire la déformation.
+ *
+ * @returns {{canvas:HTMLCanvasElement, cell:number, toSource:(x:number,y:number)=>{x:number,y:number}}}
+ */
+export function flatten(photo, mesh, cell = 28) {
+  const R = mesh.hLines.length - 1;
+  const C = mesh.vLines.length - 1;
+  const out = document.createElement('canvas');
+  out.width = C * cell;
+  out.height = R * cell;
+  const ctx = out.getContext('2d', { willReadFrequently: true });
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, 0, out.width, out.height);
+  ctx.imageSmoothingQuality = 'high';
+
+  // Case par case : une transformation affine par case suit la courbure d'assez
+  // près, les cases étant petites devant le rayon de courbure.
+  for (let r = 0; r < R; r++) {
+    for (let c = 0; c < C; c++) {
+      const A = node(mesh, r, c);
+      const B = node(mesh, r, c + 1);
+      const E = node(mesh, r + 1, c);
+      const m11 = (B.x - A.x) / cell;
+      const m21 = (B.y - A.y) / cell;
+      const m12 = (E.x - A.x) / cell;
+      const m22 = (E.y - A.y) / cell;
+      const det = m11 * m22 - m12 * m21;
+      if (!det) continue;
+      const i11 = m22 / det;
+      const i12 = -m12 / det;
+      const i21 = -m21 / det;
+      const i22 = m11 / det;
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(c * cell, r * cell, cell, cell);
+      ctx.clip();
+      ctx.setTransform(
+        i11, i21, i12, i22,
+        c * cell - (i11 * A.x + i12 * A.y),
+        r * cell - (i21 * A.x + i22 * A.y)
+      );
+      ctx.drawImage(photo, 0, 0);
+      ctx.restore();
+    }
+  }
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+
+  /** Ramène un point de l'image aplatie vers la photo d'origine. */
+  const toSource = (x, y) => {
+    const c = Math.min(C - 1, Math.max(0, Math.floor(x / cell)));
+    const r = Math.min(R - 1, Math.max(0, Math.floor(y / cell)));
+    return cellPoint(mesh, r, c, x / cell - c, y / cell - r);
+  };
+  return { canvas: out, cell, rows: R, cols: C, toSource };
+}
+
 /** Coin (i, j) du maillage. */
 export function node(mesh, i, j) {
   const C = mesh.vLines.length;
@@ -384,24 +532,81 @@ export function node(mesh, i, j) {
   return { x: mesh.nodes[k], y: mesh.nodes[k + 1] };
 }
 
-/** Boîte englobante d'une case, resserrée pour ignorer le quadrillage. */
-export function cellBox(mesh, r, c, inset = 0.16) {
+function lerp(p, q, t) {
+  return { x: p.x + (q.x - p.x) * t, y: p.y + (q.y - p.y) * t };
+}
+
+/** Point d'une case en coordonnées relatives (u, v) ∈ [0,1]². */
+function cellPoint(mesh, r, c, u, v) {
   const a = node(mesh, r, c);
   const b = node(mesh, r, c + 1);
   const d = node(mesh, r + 1, c + 1);
   const e = node(mesh, r + 1, c);
-  const x0 = Math.min(a.x, e.x);
-  const x1 = Math.max(b.x, d.x);
-  const y0 = Math.min(a.y, b.y);
-  const y1 = Math.max(e.y, d.y);
-  const ix = (x1 - x0) * inset;
-  const iy = (y1 - y0) * inset;
+  return lerp(lerp(a, b, u), lerp(e, d, u), v);
+}
+
+/** Boîte englobante d'une case, resserrée pour ignorer le quadrillage. */
+export function cellBox(mesh, r, c, inset = 0.18) {
+  const corners = [
+    cellPoint(mesh, r, c, inset, inset),
+    cellPoint(mesh, r, c, 1 - inset, inset),
+    cellPoint(mesh, r, c, 1 - inset, 1 - inset),
+    cellPoint(mesh, r, c, inset, 1 - inset),
+  ];
+  const xs = corners.map((p) => p.x);
+  const ys = corners.map((p) => p.y);
   return {
-    x0: Math.max(0, Math.round(x0 + ix)),
-    y0: Math.max(0, Math.round(y0 + iy)),
-    x1: Math.min(mesh.width, Math.round(x1 - ix)),
-    y1: Math.min(mesh.height, Math.round(y1 - iy)),
+    x0: Math.max(0, Math.round(Math.min(...xs))),
+    y0: Math.max(0, Math.round(Math.min(...ys))),
+    x1: Math.min(mesh.width, Math.round(Math.max(...xs))),
+    y1: Math.min(mesh.height, Math.round(Math.max(...ys))),
   };
+}
+
+/**
+ * Découpe une case en la redressant d'après le maillage.
+ *
+ * Une simple boîte englobante rapporterait, sur une photo prise de biais, un
+ * chiffre penché flanqué de morceaux des cases voisines. Le maillage connaît
+ * les quatre coins réels de la case : une transformation affine suffit à la
+ * remettre d'aplomb.
+ *
+ * `scale` permet de puiser les pixels dans une image plus fine que celle qui a
+ * servi à la géométrie. La détection du quadrillage travaille mieux en basse
+ * résolution — des bandes trop fines par rapport aux cases prennent les
+ * chiffres pour des traits — alors que la lecture, elle, veut le plus de
+ * pixels possible.
+ */
+export function cellCanvas(photo, mesh, r, c, inset = 0.19, scale = 1) {
+  const at = (u, v) => {
+    const p = cellPoint(mesh, r, c, u, v);
+    return { x: p.x * scale, y: p.y * scale };
+  };
+  const A = at(inset, inset);
+  const B = at(1 - inset, inset);
+  const E = at(inset, 1 - inset);
+  const wpx = Math.max(1, Math.round(Math.hypot(B.x - A.x, B.y - A.y)));
+  const hpx = Math.max(1, Math.round(Math.hypot(E.x - A.x, E.y - A.y)));
+  const out = document.createElement('canvas');
+  out.width = wpx;
+  out.height = hpx;
+  const ctx = out.getContext('2d', { willReadFrequently: true });
+
+  // Transformation directe (u, v) → photo, puis son inverse pour dessiner.
+  const m11 = (B.x - A.x) / wpx;
+  const m21 = (B.y - A.y) / wpx;
+  const m12 = (E.x - A.x) / hpx;
+  const m22 = (E.y - A.y) / hpx;
+  const det = m11 * m22 - m12 * m21;
+  if (!det) return null;
+  const i11 = m22 / det;
+  const i12 = -m12 / det;
+  const i21 = -m21 / det;
+  const i22 = m11 / det;
+  ctx.setTransform(i11, i21, i12, i22, -(i11 * A.x + i12 * A.y), -(i21 * A.x + i22 * A.y));
+  ctx.drawImage(photo, 0, 0);
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  return out;
 }
 
 /** Densité d'encre de chaque case (hors traits du quadrillage). */
@@ -417,6 +622,223 @@ export function cellDensities(ink, w, h, mesh) {
     }
   }
   return dens;
+}
+
+/**
+ * Construit un maillage parfaitement régulier.
+ *
+ * Sur une image déjà aplatie, le quadrillage n'a plus à être décrit par des
+ * polylignes : il suffit d'un pas et d'une origine.
+ */
+export function regularMesh(cols, rows, cell, originX, originY, width, height) {
+  const sampleX = [0, width];
+  const sampleY = [0, height];
+  const hLines = [];
+  for (let i = 0; i <= rows; i++) {
+    const y = originY + i * cell;
+    hLines.push(Float64Array.from([y, y]));
+  }
+  const vLines = [];
+  for (let j = 0; j <= cols; j++) {
+    const x = originX + j * cell;
+    vLines.push(Float64Array.from([x, x]));
+  }
+  const nodes = new Float64Array((rows + 1) * (cols + 1) * 2);
+  for (let i = 0; i <= rows; i++) {
+    for (let j = 0; j <= cols; j++) {
+      const k = (i * (cols + 1) + j) * 2;
+      nodes[k] = originX + j * cell;
+      nodes[k + 1] = originY + i * cell;
+    }
+  }
+  return { hLines, vLines, sampleX, sampleY, rows, cols, width, height, nodes, pitchX: cell, pitchY: cell };
+}
+
+/**
+ * Construit un maillage à partir d'une fonction donnant ses nœuds.
+ *
+ * Sert à exprimer, dans le repère de la photo d'origine, un quadrillage
+ * délimité sur l'image redressée : la géométrie vient du redressement, les
+ * pixels restent ceux de la photo, qu'un second rééchantillonnage ne viendrait
+ * qu'abîmer avant l'OCR.
+ */
+export function meshFromNodes(rows, cols, getNode, width, height) {
+  const nodes = new Float64Array((rows + 1) * (cols + 1) * 2);
+  for (let i = 0; i <= rows; i++) {
+    for (let j = 0; j <= cols; j++) {
+      const p = getNode(i, j);
+      const k = (i * (cols + 1) + j) * 2;
+      nodes[k] = p.x;
+      nodes[k + 1] = p.y;
+    }
+  }
+  // Les polylignes ne servent plus qu'à porter les dimensions.
+  const hLines = Array.from({ length: rows + 1 }, () => Float64Array.of(0, 0));
+  const vLines = Array.from({ length: cols + 1 }, () => Float64Array.of(0, 0));
+  return {
+    hLines, vLines,
+    sampleX: [0, width], sampleY: [0, height],
+    rows, cols, width, height, nodes,
+  };
+}
+
+/**
+ * Cherche l'étendue du tableau sur un réseau de pas connu.
+ *
+ * Après aplatissement, le pas du quadrillage n'est plus à deviner : il vaut
+ * exactement la taille de case choisie au rééchantillonnage. Il ne reste
+ * qu'à dire quelles positions du réseau portent un vrai trait — ce qui se
+ * décide sur la longueur du plus long segment d'encre, mesuré cette fois d'un
+ * bord à l'autre de l'image et non bande par bande.
+ *
+ * C'est aussi ce qui écarte l'arrière-plan : une grille imprimée aligne des
+ * dizaines de traits consécutifs au pas exact, ce qu'un grillage de jardin ou
+ * un bord de page ne font pas.
+ *
+ * @returns {null|{i0:number,i1:number,j0:number,j1:number,
+ *                  scoreH:Float64Array,scoreV:Float64Array,
+ *                  offsetH:Float64Array,offsetV:Float64Array}}
+ */
+export function latticeExtent(ink, w, h, cell, threshold = 0.22, window = 2) {
+  // Le décalage retenu est rendu avec le score : la fenêtre de recherche vaut
+  // une fraction de case, et l'ignorer reviendrait à découper les cases de
+  // travers — assez pour rogner le haut des chiffres avant de les lire.
+  const runAlong = (k, vertical) => {
+    const pos = Math.round(k * cell);
+    const span = vertical ? h : w;
+    let best = 0;
+    let bestOffset = 0;
+    for (let d = -window; d <= window; d++) {
+      const q = pos + d;
+      if (q < 0 || q >= (vertical ? w : h)) continue;
+      let run = 0;
+      let gap = 0;
+      let longest = 0;
+      for (let t = 0; t < span; t++) {
+        const on = vertical ? ink[t * w + q] : ink[q * w + t];
+        if (on) { run += gap + 1; gap = 0; if (run > longest) longest = run; }
+        else if (++gap > 2) { run = 0; gap = 0; }
+      }
+      if (longest > best) { best = longest; bestOffset = d; }
+    }
+    return { score: best / span, offset: bestOffset };
+  };
+
+  const nV = Math.round(w / cell);
+  const nH = Math.round(h / cell);
+  const scoreV = new Float64Array(nV + 1);
+  const scoreH = new Float64Array(nH + 1);
+  const offsetV = new Float64Array(nV + 1);
+  const offsetH = new Float64Array(nH + 1);
+  for (let j = 0; j <= nV; j++) { const r = runAlong(j, true); scoreV[j] = r.score; offsetV[j] = r.offset; }
+  for (let i = 0; i <= nH; i++) { const r = runAlong(i, false); scoreH[i] = r.score; offsetH[i] = r.offset; }
+
+  // Plus longue suite de traits présents, un manque isolé toléré.
+  const longestRun = (score) => {
+    let best = null;
+    let start = -1;
+    let misses = 0;
+    for (let k = 0; k < score.length; k++) {
+      const ok = score[k] >= threshold;
+      if (ok) {
+        if (start < 0) start = k;
+        misses = 0;
+      } else if (start >= 0) {
+        if (++misses > 1) {
+          const end = k - misses;
+          if (!best || end - start > best.b - best.a) best = { a: start, b: end };
+          start = -1;
+          misses = 0;
+        }
+      }
+    }
+    if (start >= 0) {
+      const end = score.length - 1;
+      if (!best || end - start > best.b - best.a) best = { a: start, b: end };
+    }
+    return best;
+  };
+
+  // Le recalage suit la tendance des décalages, ajustée sur les seuls traits
+  // francs.
+  //
+  // Un décalage unique ne suffit pas : l'erreur du modèle n'est pas un biais
+  // constant mais une dérive, qui s'accentue dans les rangées extrapolées
+  // au-delà du maillage détecté — précisément le bloc d'indices du haut. Les
+  // chiffres y étaient rognés et les cases vides ramassaient des coins de
+  // quadrillage. Corriger trait par trait, en revanche, fait trembler le
+  // maillage, le décalage d'un trait pâle étant arbitraire : d'où un
+  // ajustement polynomial de degré 2, pondéré par la seule présence de traits
+  // francs, qui capte la dérive sans en épouser le bruit.
+  const trend = (scores, offsets) => {
+    let max = 0;
+    for (const v of scores) if (v > max) max = v;
+    const ts = [];
+    const ys = [];
+    for (let k = 0; k < scores.length; k++) {
+      if (scores[k] >= max * 0.5) { ts.push(k); ys.push(offsets[k]); }
+    }
+    const out = new Float64Array(scores.length);
+    if (ts.length < 4) {
+      if (!ts.length) return out;
+      const sorted = [...ys].sort((a, b) => a - b);
+      out.fill(sorted[sorted.length >> 1]);
+      return out;
+    }
+    const degree = ts.length >= 8 ? 2 : 1;
+    const m = degree + 1;
+    const A = new Float64Array(m * m);
+    const rhs = new Float64Array(m);
+    for (let k = 0; k < ts.length; k++) {
+      const pow = [1, ts[k], ts[k] * ts[k]];
+      for (let i = 0; i < m; i++) {
+        rhs[i] += pow[i] * ys[k];
+        for (let j = 0; j < m; j++) A[i * m + j] += pow[i] * pow[j];
+      }
+    }
+    for (let i = 0; i < m; i++) {
+      let piv = i;
+      for (let r = i + 1; r < m; r++) if (Math.abs(A[r * m + i]) > Math.abs(A[piv * m + i])) piv = r;
+      if (Math.abs(A[piv * m + i]) < 1e-9) return out;
+      if (piv !== i) {
+        for (let c = 0; c < m; c++) { const t = A[i * m + c]; A[i * m + c] = A[piv * m + c]; A[piv * m + c] = t; }
+        const t = rhs[i]; rhs[i] = rhs[piv]; rhs[piv] = t;
+      }
+      for (let r = i + 1; r < m; r++) {
+        const f = A[r * m + i] / A[i * m + i];
+        for (let c = i; c < m; c++) A[r * m + c] -= f * A[i * m + c];
+        rhs[r] -= f * rhs[i];
+      }
+    }
+    const coef = new Float64Array(m);
+    for (let i = m - 1; i >= 0; i--) {
+      let acc = rhs[i];
+      for (let j = i + 1; j < m; j++) acc -= A[i * m + j] * coef[j];
+      coef[i] = acc / A[i * m + i];
+    }
+    // Hors de la plage ajustée, la tendance est gelée : extrapoler un
+    // polynôme loin de ses appuis diverge vite.
+    const first = ts[0];
+    const last = ts[ts.length - 1];
+    const evalAt = (t) => {
+      const u = Math.min(last, Math.max(first, t));
+      let acc = 0;
+      for (let i = m - 1; i >= 0; i--) acc = acc * u + coef[i];
+      return acc;
+    };
+    for (let k = 0; k < scores.length; k++) out[k] = evalAt(k);
+    return out;
+  };
+
+  const v = longestRun(scoreV);
+  const hh = longestRun(scoreH);
+  if (!v || !hh || v.b - v.a < 4 || hh.b - hh.a < 4) return null;
+  return {
+    i0: hh.a, i1: hh.b, j0: v.a, j1: v.b,
+    scoreH, scoreV,
+    offsetH: trend(scoreH, offsetH),
+    offsetV: trend(scoreV, offsetV),
+  };
 }
 
 /**
@@ -441,6 +863,47 @@ export function findSplit(dens, rows, cols, minPuzzle = 4) {
     }
   }
   return best;
+}
+
+/**
+ * Empile les bandes de toutes les lignes d'indices en une seule planche.
+ *
+ * Tesseract y voit un bloc de texte et le lit d'un seul appel. Le gain n'est
+ * pas la vitesse — les lectures ligne par ligne sont déjà rapides — mais le
+ * fait d'obtenir une *seconde* lecture, indépendante de la première : les deux
+ * ne se trompent pas aux mêmes endroits, et leur désaccord désigne exactement
+ * les lignes à vérifier.
+ *
+ * @param {{r:number,c:number}[][]} groups cases de chaque ligne d'indices
+ * @returns {{canvas:HTMLCanvasElement, slots:{line:number,index:number,
+ *            x0:number,x1:number,y0:number,y1:number,cell:HTMLCanvasElement}[]}}
+ */
+export function composeSheet(canvas, mesh, groups, cellHeight = 64, gap = 44, scale = 1, leading = 30) {
+  const strips = groups.map((cells) => composeStrip(canvas, mesh, cells, cellHeight, gap, scale));
+  const width = Math.max(1, ...strips.map((s) => s.canvas.width));
+  const lineHeight = cellHeight + gap;
+  const out = document.createElement('canvas');
+  out.width = width + 40;
+  out.height = strips.length * (lineHeight + leading) + 40;
+  const g = out.getContext('2d', { willReadFrequently: true });
+  g.fillStyle = '#fff';
+  g.fillRect(0, 0, out.width, out.height);
+
+  const slots = [];
+  let y = 20;
+  strips.forEach((strip, line) => {
+    g.drawImage(strip.canvas, 20, y);
+    strip.slots.forEach((slot, index) => {
+      slots.push({
+        line, index,
+        x0: 20 + slot.x0, x1: 20 + slot.x1,
+        y0: y, y1: y + lineHeight,
+        cell: slot.cell,
+      });
+    });
+    y += lineHeight + leading;
+  });
+  return { canvas: out, slots, strips };
 }
 
 /** Seuil d'Otsu d'un histogramme de niveaux de gris. */
@@ -485,11 +948,12 @@ function otsu(gray) {
  *
  * @returns {null|{data:ImageData, w:number, h:number}} null si la case est vide
  */
-function binarizeCell(ctx, box) {
-  const w = box.x1 - box.x0;
-  const h = box.y1 - box.y0;
+function binarizeCell(cell) {
+  if (!cell) return null;
+  const w = cell.width;
+  const h = cell.height;
   if (w < 5 || h < 5) return null;
-  const src = ctx.getImageData(box.x0, box.y0, w, h);
+  const src = cell.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, w, h);
   const gray = new Uint8ClampedArray(w * h);
   for (let i = 0, p = 0; i < src.data.length; i += 4, p++) {
     const r = src.data[i], g = src.data[i + 1], b = src.data[i + 2];
@@ -545,8 +1009,16 @@ function binarizeCell(ctx, box) {
     if (c.area < minArea) return false;
     const cw = c.x1 - c.x0 + 1;
     const ch = c.y1 - c.y0 + 1;
-    // Barre fine collée au bord : reste de quadrillage.
-    if (c.edge && (cw < w * 0.2 || ch < h * 0.2)) return false;
+    if (c.edge) {
+      // Barre fine collée au bord : reste de quadrillage.
+      if (cw < w * 0.2 || ch < h * 0.2) return false;
+      // Morceau nettement plus large que haut : bordure du tableau, épaisse
+      // là où le quadrillage est fin. Le critère de finesse seul la laissait
+      // passer, et elle se lisait comme un chiffre de plus. Aucun chiffre
+      // n'est deux fois plus large que haut ; l'inverse, si — « 1 » est
+      // étroit et haut — d'où un critère volontairement à sens unique.
+      if (cw > ch * 2) return false;
+    }
     // Trait traversant toute la case sur une largeur dérisoire.
     if (ch > h * 0.92 && cw < w * 0.22) return false;
     if (cw > w * 0.92 && ch < h * 0.22) return false;
@@ -576,7 +1048,31 @@ function binarizeCell(ctx, box) {
       out.data[q + 3] = 255;
     }
   }
-  return { data: out, w: cw, h: ch };
+  // Un contenu qui atteint un bord latéral a sans doute été coupé.
+  const clipped = keep.some((c) => c.x0 === 0 || c.x1 === w - 1);
+  return { data: out, w: cw, h: ch, clipped };
+}
+
+/**
+ * Découpe et nettoie une case, en desserrant le retrait si le contenu semble
+ * avoir été coupé.
+ *
+ * Un retrait franc écarte le quadrillage, mais un nombre à deux chiffres
+ * remplit la case : le « 0 » de « 10 » s'y perdait, amputé sur la droite.
+ * Desserrer d'emblée ne marche pas non plus — le trait entre alors dans la
+ * case et se colle au chiffre. D'où ce second essai, réservé aux cas où le
+ * premier découpage a visiblement mordu sur le contenu.
+ */
+function extractCell(photo, mesh, r, c, scale) {
+  const first = binarizeCell(cellCanvas(photo, mesh, r, c, 0.19, scale));
+  // Case jugée vide au retrait franc : on s'en tient là. Desserrer y ferait
+  // entrer le quadrillage, qui se lirait comme un chiffre.
+  if (!first) return null;
+  if (!first.clipped) return first;
+  // Contenu coupé : le découpage plus large en retient davantage, et reste
+  // préférable même s'il touche encore un bord.
+  const second = binarizeCell(cellCanvas(photo, mesh, r, c, 0.10, scale));
+  return second || first;
 }
 
 /**
@@ -588,13 +1084,23 @@ function binarizeCell(ctx, box) {
  * ligne d'indices comme un seul nombre (« 2212121 ») ; en replaçant chaque
  * caractère reconnu dans sa case d'origine, on retrouve « 2 2 1 2 1 2 1 ».
  *
- * @returns {{canvas:HTMLCanvasElement, slots:{x0:number,x1:number}[]}}
+ * Puisque les cases sont ainsi réadressées par position, on pourrait croire la
+ * bande inutile et présenter chaque case seule à l'OCR. C'est faux, et
+ * mesuré : case par case, la lecture s'effondre — 23 lignes exactes sur 30 au
+ * lieu de 30 sur la grille manuscrite, 29 sur 35 au lieu de 34 sur livre-01,
+ * et 13 colonnes sur 35 au lieu de 33 sur livre-45 — pour un temps identique.
+ * Tesseract lit une *ligne* : il en tire une hauteur d'x, une ligne de base et
+ * un contexte que ne lui offre pas un glyphe isolé sur fond blanc. La bande
+ * n'économise donc pas des appels, elle recompose ce dont le moteur a besoin.
+ * Les lectures case par case gardent leur place, mais en second recours, là où
+ * la bande a échoué.
+ *
+ * @returns {{canvas:HTMLCanvasElement, slots:{x0:number,x1:number,cell:HTMLCanvasElement}[]}}
  */
-export function composeStrip(canvas, mesh, cells, cellHeight = 64, gap = 44) {
-  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+export function composeStrip(canvas, mesh, cells, cellHeight = 64, gap = 44, scale = 1) {
   const pieces = [];
   for (const { r, c } of cells) {
-    const bin = binarizeCell(ctx, cellBox(mesh, r, c, 0.17));
+    const bin = extractCell(canvas, mesh, r, c, scale);
     if (!bin) continue;
     const tmp = document.createElement('canvas');
     tmp.width = bin.w;
@@ -617,7 +1123,7 @@ export function composeStrip(canvas, mesh, cells, cellHeight = 64, gap = 44) {
   let x = gap;
   pieces.forEach((p, i) => {
     g.drawImage(p.canvas, 0, 0, p.w, p.h, x, gap / 2, widths[i], cellHeight);
-    slots.push({ x0: x - gap / 2, x1: x + widths[i] + gap / 2 });
+    slots.push({ x0: x - gap / 2, x1: x + widths[i] + gap / 2, cell: p.canvas });
     x += widths[i] + gap;
   });
   return { canvas: out, slots };

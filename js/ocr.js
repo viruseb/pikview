@@ -137,6 +137,18 @@ export async function readStrip(worker, strip) {
     for (const b of bucket) { confSum += b.conf; confCount++; confMin = Math.min(confMin, b.conf); }
   });
 
+  // Seconde tentative, case par case, sur les cases restées muettes.
+  //
+  // Tesseract rend parfois un texte vide sur un chiffre pourtant net : le
+  // glyphe est classé comme lettre, et la liste blanche le supprime au lieu
+  // de le rabattre sur un chiffre. En mode « caractère isolé », sur la seule
+  // case concernée, il retombe sur ses pieds.
+  for (let i = 0; i < values.length; i++) {
+    if (values[i] !== null || !strip.slots[i].cell) continue;
+    const n = await readSingleCell(worker, strip.slots[i].cell);
+    if (n !== null) values[i] = n;
+  }
+
   // Repli : si le découpage par position n'a rien donné (aucune boîte
   // fournie), on retombe sur le texte brut séparé par les espaces.
   if (values.every((v) => v === null) && data.text) {
@@ -150,6 +162,67 @@ export async function readStrip(worker, strip) {
     minConfidence: confCount ? confMin : 0,
   };
 }
+
+/**
+ * Lit une planche composée par `composeSheet`, en un seul appel.
+ *
+ * Comme pour une bande, ce n'est pas la segmentation de Tesseract qui sépare
+ * les nombres : chaque caractère reconnu est réaffecté à la case dont il
+ * occupe l'emplacement, en abscisse comme en ordonnée.
+ *
+ * @returns {Promise<(number|null)[]>} une valeur par case, dans l'ordre des slots
+ */
+export async function readSheet(worker, sheet) {
+  const values = sheet.slots.map(() => null);
+  if (!sheet.slots.length) return values;
+
+  await worker.setParameters({ tessedit_pageseg_mode: '6' });
+  let data;
+  try {
+    ({ data } = await worker.recognize(sheet.canvas, {}, { blocks: true, text: true }));
+  } finally {
+    await worker.setParameters({ tessedit_pageseg_mode: '7' }).catch(() => {});
+  }
+
+  const buckets = sheet.slots.map(() => []);
+  for (const sym of collectSymbols(data)) {
+    const text = (sym.text || '').trim();
+    if (!/[0-9]/.test(text)) continue;
+    const box = sym.bbox || {};
+    const cx = (box.x0 + box.x1) / 2;
+    const cy = (box.y0 + box.y1) / 2;
+    const i = sheet.slots.findIndex((s) => cx >= s.x0 && cx < s.x1 && cy >= s.y0 && cy < s.y1);
+    if (i < 0) continue;
+    buckets[i].push({ x: box.x0, text: text.replace(/[^0-9]/g, '') });
+  }
+  buckets.forEach((bucket, i) => {
+    if (!bucket.length) return;
+    bucket.sort((a, b) => a.x - b.x);
+    const n = parseInt(bucket.map((b) => b.text).join(''), 10);
+    if (Number.isFinite(n) && n > 0) values[i] = n;
+  });
+  return values;
+}
+
+/**
+ * Relit une case isolée dans un autre mode de segmentation.
+ * @param {'10'|'8'} mode « caractère isolé » ou « mot isolé »
+ */
+export async function readCell(worker, cell, mode = '10') {
+  try {
+    await worker.setParameters({ tessedit_pageseg_mode: mode });
+    const { data } = await worker.recognize(cell, {}, { text: true });
+    const digits = (data.text || '').replace(/[^0-9]/g, '');
+    const n = parseInt(digits, 10);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  } catch {
+    return null;
+  } finally {
+    await worker.setParameters({ tessedit_pageseg_mode: '7' }).catch(() => {});
+  }
+}
+
+const readSingleCell = (worker, cell) => readCell(worker, cell, '10');
 
 export async function terminate() {
   if (!workerPromise) return;

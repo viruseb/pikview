@@ -180,7 +180,7 @@ html, body {
 .clue-list { display: flex; flex-direction: column; gap: 6px; }
 .clue {
   display: grid;
-  grid-template-columns: 46px 1fr;
+  grid-template-columns: 46px 1fr auto;
   align-items: center;
   gap: 8px;
 }
@@ -198,6 +198,21 @@ html, body {
 }
 .clue input:focus { outline: 2px solid var(--accent); border-color: transparent; }
 .clue.doubt input { border-color: var(--warn); background: #2a2418; }
+/* Lecture concurrente : un appui l'adopte, un second revient en arrière. */
+.clue .alt {
+  grid-column: 3;
+  background: var(--panel-2);
+  border: 1px dashed var(--warn);
+  color: var(--warn);
+  border-radius: 8px;
+  padding: 7px 10px;
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  cursor: pointer;
+  min-height: 38px;
+}
+.clue .alt::before { content: '↔ '; }
 .clue.bad input { border-color: var(--accent-2); background: #2c1a18; }
 
 .switch { display: flex; align-items: center; gap: 8px; font-size: 14px; }
