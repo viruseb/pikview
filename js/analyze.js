@@ -274,6 +274,10 @@ export async function analyzePhoto(source, opts) {
     // divergent : l'interface peut la proposer d'un geste.
     altRows: new Map(),
     altCols: new Map(),
+    // Vignette de chaque ligne d'indices, telle que l'OCR l'a vue. Sans elle,
+    // départager deux lectures reviendrait à rouvrir le magazine.
+    rowImages: [],
+    colImages: [],
   };
 
   let worker;
@@ -289,7 +293,26 @@ export async function analyzePhoto(source, opts) {
   const total = rowCells.length + colCells.length;
   let done = 0;
 
-  const readGroup = async (groups, out, doubt, alts, label, lineLength) => {
+  /** Vignette lisible d'une bande d'indices, pour l'éditeur. */
+  const thumbnail = (strip, height = 44) => {
+    const src = strip.canvas;
+    if (!src.width || !src.height) return null;
+    const c = document.createElement('canvas');
+    c.height = height;
+    c.width = Math.max(1, Math.round((src.width * height) / src.height));
+    const g = c.getContext('2d');
+    g.fillStyle = '#fff';
+    g.fillRect(0, 0, c.width, c.height);
+    g.imageSmoothingQuality = 'high';
+    g.drawImage(src, 0, 0, c.width, c.height);
+    try {
+      return c.toDataURL('image/png');
+    } catch {
+      return null;
+    }
+  };
+
+  const readGroup = async (groups, out, doubt, alts, images, label, lineLength) => {
     if (!groups.length) return;
     // Première lecture : toutes les lignes empilées, lues d'un seul appel.
     const sheet = vision.composeSheet(detail, mesh, groups, 64, 44, detailScale);
@@ -325,6 +348,8 @@ export async function analyzePhoto(source, opts) {
       }
       const fromStrip = read.values.filter((v) => v !== null);
 
+      images[i] = thumbnail(strip);
+
       const verdict = reconcile(fromSheet[i], fromStrip, lineLength);
       out[i] = verdict.clues;
       if (verdict.doubt || !verdict.clues.length) doubt.add(i);
@@ -339,8 +364,8 @@ export async function analyzePhoto(source, opts) {
     }
   };
 
-  await readGroup(rowCells, result.rowClues, result.doubtRows, result.altRows, 'de lignes', cols);
-  await readGroup(colCells, result.colClues, result.doubtCols, result.altCols, 'de colonnes', rows);
+  await readGroup(rowCells, result.rowClues, result.doubtRows, result.altRows, result.rowImages, 'de lignes', cols);
+  await readGroup(colCells, result.colClues, result.doubtCols, result.altCols, result.colImages, 'de colonnes', rows);
   return result;
 }
 

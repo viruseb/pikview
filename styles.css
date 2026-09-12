@@ -181,11 +181,38 @@ html, body {
 .clue {
   display: grid;
   grid-template-columns: 46px 1fr auto;
+  grid-template-areas:
+    'label scan  scan'
+    'label input alt';
   align-items: center;
-  gap: 8px;
+  gap: 4px 8px;
+  padding: 6px 0;
 }
-.clue span { font-size: 12px; color: var(--muted); text-align: right; font-variant-numeric: tabular-nums; }
+
+/* La bande telle qu'elle a été lue : sans elle, corriger reviendrait à
+   rouvrir le magazine. */
+.clue .scan {
+  grid-area: scan;
+  justify-self: start;
+  max-width: 100%;
+  height: 30px;
+  width: auto;
+  border-radius: 5px;
+  background: #fff;
+  padding: 2px 4px;
+  /* Une ligne d'indices longue doit rétrécir sans s'écraser. */
+  object-fit: contain;
+  object-position: left center;
+}
+.clue span {
+  grid-area: label;
+  font-size: 12px;
+  color: var(--muted);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
 .clue input {
+  grid-area: input;
   width: 100%;
   background: var(--panel-2);
   border: 1px solid var(--line);
@@ -200,7 +227,7 @@ html, body {
 .clue.doubt input { border-color: var(--warn); background: #2a2418; }
 /* Lecture concurrente : un appui l'adopte, un second revient en arrière. */
 .clue .alt {
-  grid-column: 3;
+  grid-area: alt;
   background: var(--panel-2);
   border: 1px dashed var(--warn);
   color: var(--warn);
