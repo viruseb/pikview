@@ -1043,6 +1043,17 @@ function extractCell(photo, mesh, r, c, scale) {
  * ligne d'indices comme un seul nombre (« 2212121 ») ; en replaçant chaque
  * caractère reconnu dans sa case d'origine, on retrouve « 2 2 1 2 1 2 1 ».
  *
+ * Puisque les cases sont ainsi réadressées par position, on pourrait croire la
+ * bande inutile et présenter chaque case seule à l'OCR. C'est faux, et
+ * mesuré : case par case, la lecture s'effondre — 23 lignes exactes sur 30 au
+ * lieu de 30 sur la grille manuscrite, 29 sur 35 au lieu de 34 sur livre-01,
+ * et 13 colonnes sur 35 au lieu de 33 sur livre-45 — pour un temps identique.
+ * Tesseract lit une *ligne* : il en tire une hauteur d'x, une ligne de base et
+ * un contexte que ne lui offre pas un glyphe isolé sur fond blanc. La bande
+ * n'économise donc pas des appels, elle recompose ce dont le moteur a besoin.
+ * Les lectures case par case gardent leur place, mais en second recours, là où
+ * la bande a échoué.
+ *
  * @returns {{canvas:HTMLCanvasElement, slots:{x0:number,x1:number,cell:HTMLCanvasElement}[]}}
  */
 export function composeStrip(canvas, mesh, cells, cellHeight = 64, gap = 44, scale = 1) {
