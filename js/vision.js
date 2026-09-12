@@ -976,7 +976,31 @@ function binarizeCell(cell) {
       out.data[q + 3] = 255;
     }
   }
-  return { data: out, w: cw, h: ch };
+  // Un contenu qui atteint un bord latéral a sans doute été coupé.
+  const clipped = keep.some((c) => c.x0 === 0 || c.x1 === w - 1);
+  return { data: out, w: cw, h: ch, clipped };
+}
+
+/**
+ * Découpe et nettoie une case, en desserrant le retrait si le contenu semble
+ * avoir été coupé.
+ *
+ * Un retrait franc écarte le quadrillage, mais un nombre à deux chiffres
+ * remplit la case : le « 0 » de « 10 » s'y perdait, amputé sur la droite.
+ * Desserrer d'emblée ne marche pas non plus — le trait entre alors dans la
+ * case et se colle au chiffre. D'où ce second essai, réservé aux cas où le
+ * premier découpage a visiblement mordu sur le contenu.
+ */
+function extractCell(photo, mesh, r, c) {
+  const first = binarizeCell(cellCanvas(photo, mesh, r, c, 0.19));
+  // Case jugée vide au retrait franc : on s'en tient là. Desserrer y ferait
+  // entrer le quadrillage, qui se lirait comme un chiffre.
+  if (!first) return null;
+  if (!first.clipped) return first;
+  // Contenu coupé : le découpage plus large en retient davantage, et reste
+  // préférable même s'il touche encore un bord.
+  const second = binarizeCell(cellCanvas(photo, mesh, r, c, 0.10));
+  return second || first;
 }
 
 /**
@@ -988,12 +1012,12 @@ function binarizeCell(cell) {
  * ligne d'indices comme un seul nombre (« 2212121 ») ; en replaçant chaque
  * caractère reconnu dans sa case d'origine, on retrouve « 2 2 1 2 1 2 1 ».
  *
- * @returns {{canvas:HTMLCanvasElement, slots:{x0:number,x1:number}[]}}
+ * @returns {{canvas:HTMLCanvasElement, slots:{x0:number,x1:number,cell:HTMLCanvasElement}[]}}
  */
-export function composeStrip(canvas, mesh, cells, cellHeight = 64, gap = 44) {
+export function composeStrip(canvas, mesh, cells, cellHeight = 64, gap = 44, inset = 0.19) {
   const pieces = [];
   for (const { r, c } of cells) {
-    const bin = binarizeCell(cellCanvas(canvas, mesh, r, c));
+    const bin = extractCell(canvas, mesh, r, c);
     if (!bin) continue;
     const tmp = document.createElement('canvas');
     tmp.width = bin.w;
@@ -1016,7 +1040,7 @@ export function composeStrip(canvas, mesh, cells, cellHeight = 64, gap = 44) {
   let x = gap;
   pieces.forEach((p, i) => {
     g.drawImage(p.canvas, 0, 0, p.w, p.h, x, gap / 2, widths[i], cellHeight);
-    slots.push({ x0: x - gap / 2, x1: x + widths[i] + gap / 2 });
+    slots.push({ x0: x - gap / 2, x1: x + widths[i] + gap / 2, cell: p.canvas });
     x += widths[i] + gap;
   });
   return { canvas: out, slots };

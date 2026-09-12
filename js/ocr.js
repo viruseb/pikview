@@ -137,6 +137,18 @@ export async function readStrip(worker, strip) {
     for (const b of bucket) { confSum += b.conf; confCount++; confMin = Math.min(confMin, b.conf); }
   });
 
+  // Seconde tentative, case par case, sur les cases restées muettes.
+  //
+  // Tesseract rend parfois un texte vide sur un chiffre pourtant net : le
+  // glyphe est classé comme lettre, et la liste blanche le supprime au lieu
+  // de le rabattre sur un chiffre. En mode « caractère isolé », sur la seule
+  // case concernée, il retombe sur ses pieds.
+  for (let i = 0; i < values.length; i++) {
+    if (values[i] !== null || !strip.slots[i].cell) continue;
+    const n = await readSingleCell(worker, strip.slots[i].cell);
+    if (n !== null) values[i] = n;
+  }
+
   // Repli : si le découpage par position n'a rien donné (aucune boîte
   // fournie), on retombe sur le texte brut séparé par les espaces.
   if (values.every((v) => v === null) && data.text) {
@@ -149,6 +161,21 @@ export async function readStrip(worker, strip) {
     confidence: confCount ? confSum / confCount : 0,
     minConfidence: confCount ? confMin : 0,
   };
+}
+
+/** Relit une case isolée en mode « caractère isolé ». */
+async function readSingleCell(worker, cell) {
+  try {
+    await worker.setParameters({ tessedit_pageseg_mode: '10' });
+    const { data } = await worker.recognize(cell, {}, { text: true });
+    const digits = (data.text || '').replace(/[^0-9]/g, '');
+    const n = parseInt(digits, 10);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  } catch {
+    return null;
+  } finally {
+    await worker.setParameters({ tessedit_pageseg_mode: '7' }).catch(() => {});
+  }
 }
 
 export async function terminate() {

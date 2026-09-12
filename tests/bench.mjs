@@ -81,6 +81,10 @@ for (const file of files) {
   let expected = null;
   try {
     expected = JSON.parse(await readFile(join(FIXTURES, file.replace(/\.jpg$/, '.expected.json')), 'utf8'));
+    // Plusieurs photos d'une même grille partagent une seule référence.
+    if (expected.like) {
+      expected = JSON.parse(await readFile(join(FIXTURES, expected.like.replace(/\.jpg$/, '.expected.json')), 'utf8'));
+    }
   } catch { /* pas encore de référence */ }
 
   const line = { file, ms, ...score(got, expected), ...solvability(got) };
@@ -134,15 +138,21 @@ function score(got, expected) {
     };
   }
   const gridOk = got.rows === expected.rows && got.cols === expected.cols;
-  const rOk = gridOk ? got.rowClues.filter((c, i) => same(c, expected.rowClues[i])).length : 0;
-  const cOk = gridOk ? got.colClues.filter((c, i) => same(c, expected.colClues[i])).length : 0;
+  const hasRows = Array.isArray(expected.rowClues);
+  const hasCols = Array.isArray(expected.colClues);
+  const rOk = gridOk && hasRows ? got.rowClues.filter((c, i) => same(c, expected.rowClues[i])).length : 0;
+  const cOk = gridOk && hasCols ? got.colClues.filter((c, i) => same(c, expected.colClues[i])).length : 0;
   // Combien de lignes fausses l'application a-t-elle effectivement signalées ?
-  const wrongR = got.rowClues.map((c, i) => !same(c, expected.rowClues[i] || [])).map((bad, i) => bad && !got.doubtRows.includes(i));
-  const wrongC = got.colClues.map((c, i) => !same(c, expected.colClues[i] || [])).map((bad, i) => bad && !got.doubtCols.includes(i));
+  const wrongR = hasRows
+    ? got.rowClues.map((c, i) => !same(c, expected.rowClues[i] || [])).map((bad, i) => bad && !got.doubtRows.includes(i))
+    : [];
+  const wrongC = hasCols
+    ? got.colClues.map((c, i) => !same(c, expected.colClues[i] || [])).map((bad, i) => bad && !got.doubtCols.includes(i))
+    : [];
   return {
     grid: gridOk ? `ok bloc ${got.clueCols}x${got.clueRows}` : `${got.cols}x${got.rows} ≠ ${expected.cols}x${expected.rows}`,
-    lignes: `${rOk}/${expected.rows}`,
-    colonnes: `${cOk}/${expected.cols}`,
+    lignes: hasRows ? `${rOk}/${expected.rows}` : '—',
+    colonnes: hasCols ? `${cOk}/${expected.cols}` : '—',
     'fausses non signalées': wrongR.filter(Boolean).length + wrongC.filter(Boolean).length,
   };
 }
