@@ -228,8 +228,8 @@ export async function analyzePhoto(source, opts) {
 
   onProgress({ text: 'Préparation de l’image…', value: 0.05 });
   await nextTick();
-  const work = vision.toWorkingCanvas(source, WORK_DIM);
-  const detail = vision.toWorkingCanvas(source, DETAIL_DIM);
+  const work = vision.toWorkingCanvas(source, opts.workDim || WORK_DIM);
+  const detail = vision.toWorkingCanvas(source, opts.detailDim || DETAIL_DIM);
   const detailScale = detail.width / work.width;
   const { photo, ink, w, h } = prepare(work);
 
@@ -278,6 +278,16 @@ export async function analyzePhoto(source, opts) {
       const read = strip.slots.length
         ? await ocr.readStrip(worker, strip)
         : { values: [], confidence: 0, minConfidence: 0 };
+      // Un indice plus grand que la ligne ne peut pas exister : la case est
+      // relue en « mot isolé », mode mieux adapté aux nombres à deux chiffres
+      // que le livre imprime en corps réduit — « 16 » y ressortait « 146 ».
+      for (let k = 0; k < read.values.length; k++) {
+        if (read.values[k] === null || read.values[k] <= lineLength) continue;
+        const cell = strip.slots[k] && strip.slots[k].cell;
+        if (!cell) continue;
+        const again = await ocr.readCell(worker, cell, '8');
+        if (again !== null && again <= lineLength) read.values[k] = again;
+      }
       const clues = read.values.filter((v) => v !== null);
       out[i] = clues;
       if (isDoubtful(read, clues, lineLength)) doubt.add(i);

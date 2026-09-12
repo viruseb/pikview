@@ -163,10 +163,13 @@ export async function readStrip(worker, strip) {
   };
 }
 
-/** Relit une case isolée en mode « caractère isolé ». */
-async function readSingleCell(worker, cell) {
+/**
+ * Relit une case isolée dans un autre mode de segmentation.
+ * @param {'10'|'8'} mode « caractère isolé » ou « mot isolé »
+ */
+export async function readCell(worker, cell, mode = '10') {
   try {
-    await worker.setParameters({ tessedit_pageseg_mode: '10' });
+    await worker.setParameters({ tessedit_pageseg_mode: mode });
     const { data } = await worker.recognize(cell, {}, { text: true });
     const digits = (data.text || '').replace(/[^0-9]/g, '');
     const n = parseInt(digits, 10);
@@ -177,6 +180,8 @@ async function readSingleCell(worker, cell) {
     await worker.setParameters({ tessedit_pageseg_mode: '7' }).catch(() => {});
   }
 }
+
+const readSingleCell = (worker, cell) => readCell(worker, cell, '10');
 
 export async function terminate() {
   if (!workerPromise) return;
