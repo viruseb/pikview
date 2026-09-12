@@ -13,6 +13,18 @@ import { fitModel, modelRange, flattenByModel } from './rectify.js';
 const CELL = 26;
 
 /**
+ * Résolutions de travail.
+ *
+ * La géométrie se détecte mieux en deçà de 1400 px : au-delà, une bande couvre
+ * trop peu de cases, la longueur de segment exigée tombe sous la taille d'un
+ * chiffre, et les blocs d'indices se mettent à ressembler à du quadrillage.
+ * La lecture des chiffres, à l'inverse, profite de chaque pixel. D'où deux
+ * images : l'une pour mesurer, l'autre pour lire.
+ */
+const WORK_DIM = 1400;
+const DETAIL_DIM = 2400;
+
+/**
  * Extrait le masque d'encre de la photo.
  *
  * Aucun redressement global : le maillage suit les traits à leur pente locale
@@ -41,11 +53,12 @@ export function prepare(sourceCanvas) {
  * @returns {null|{photo:HTMLCanvasElement, ink:Uint8Array, mesh:object, split:object,
  *                 dens:Float32Array, rows:number, cols:number, flattened:boolean}}
  */
-export function locateGrid(photo, ink, w, h) {
-  const mesh = vision.detectMesh(ink, w, h);
+export function locateGrid(photo, ink, w, h, opts = {}) {
+  const { strips, runFactor } = opts;
+  const mesh = vision.detectMesh(ink, w, h, strips, runFactor);
   if (!mesh || mesh.cols < 5 || mesh.rows < 5) return null;
 
-  const rectified = rectifyToLattice(photo, mesh, w, h);
+  const rectified = rectifyToLattice(photo, mesh, w, h, opts);
   if (rectified) {
     const dens = vision.cellDensities(ink, w, h, rectified.mesh);
     const split = vision.findSplit(dens, rectified.mesh.rows, rectified.mesh.cols);
@@ -87,7 +100,7 @@ export function locateGrid(photo, ink, w, h) {
  * dans la photo elle-même : un second rééchantillonnage flouterait les
  * chiffres imprimés juste avant de les donner à lire.
  */
-function rectifyToLattice(photo, mesh, w, h) {
+function rectifyToLattice(photo, mesh, w, h, opts = {}) {
   const model = fitModel(mesh);
   if (!model) return null;
   const range = modelRange(model, w, h);
@@ -128,7 +141,7 @@ function rectifyToLattice(photo, mesh, w, h) {
     cropGray.gray, cropGray.w, cropGray.h,
     Math.max(8, Math.round(Math.min(cropGray.w, cropGray.h) / 45)), 9
   );
-  const cropMesh = vision.detectMesh(cropInk, cropGray.w, cropGray.h);
+  const cropMesh = vision.detectMesh(cropInk, cropGray.w, cropGray.h, opts.strips, opts.runFactor);
 
   const toIndex = (x, y) => ({
     i: range.i0 + (y0 + y) / CELL,
@@ -203,19 +216,22 @@ export function isDoubtful(read, clues, lineLength) {
 /**
  * Analyse complète : photo → indices.
  *
- * @param {HTMLCanvasElement} sourceCanvas
+ * @param {HTMLImageElement|HTMLCanvasElement|ImageBitmap} source image d'origine
  * @param {object} opts
  * @param {() => Promise<object>} opts.getWorker fournit le worker OCR
  * @param {(p:{text:string, value:number}) => void} [opts.onProgress]
  * @param {() => boolean} [opts.cancelled]
  * @param {object} opts.ocr module de lecture (injecté pour le test)
  */
-export async function analyzePhoto(sourceCanvas, opts) {
+export async function analyzePhoto(source, opts) {
   const { getWorker, ocr, onProgress = () => {}, cancelled = () => false } = opts;
 
-  onProgress({ text: 'Redressement de l’image…', value: 0.05 });
+  onProgress({ text: 'Préparation de l’image…', value: 0.05 });
   await nextTick();
-  const { photo, ink, w, h } = prepare(sourceCanvas);
+  const work = vision.toWorkingCanvas(source, WORK_DIM);
+  const detail = vision.toWorkingCanvas(source, DETAIL_DIM);
+  const detailScale = detail.width / work.width;
+  const { photo, ink, w, h } = prepare(work);
 
   onProgress({ text: 'Détection du quadrillage…', value: 0.15 });
   await nextTick();
@@ -258,7 +274,7 @@ export async function analyzePhoto(sourceCanvas, opts) {
       if (cancelled()) return;
       const cells = groups[i];
       if (!cells.length) { out[i] = []; doubt.add(i); done++; continue; }
-      const strip = vision.composeStrip(located.photo, mesh, cells);
+      const strip = vision.composeStrip(detail, mesh, cells, 64, 44, detailScale);
       const read = strip.slots.length
         ? await ocr.readStrip(worker, strip)
         : { values: [], confidence: 0, minConfidence: 0 };

@@ -570,11 +570,21 @@ export function cellBox(mesh, r, c, inset = 0.18) {
  * chiffre penché flanqué de morceaux des cases voisines. Le maillage connaît
  * les quatre coins réels de la case : une transformation affine suffit à la
  * remettre d'aplomb.
+ *
+ * `scale` permet de puiser les pixels dans une image plus fine que celle qui a
+ * servi à la géométrie. La détection du quadrillage travaille mieux en basse
+ * résolution — des bandes trop fines par rapport aux cases prennent les
+ * chiffres pour des traits — alors que la lecture, elle, veut le plus de
+ * pixels possible.
  */
-export function cellCanvas(photo, mesh, r, c, inset = 0.19) {
-  const A = cellPoint(mesh, r, c, inset, inset);
-  const B = cellPoint(mesh, r, c, 1 - inset, inset);
-  const E = cellPoint(mesh, r, c, inset, 1 - inset);
+export function cellCanvas(photo, mesh, r, c, inset = 0.19, scale = 1) {
+  const at = (u, v) => {
+    const p = cellPoint(mesh, r, c, u, v);
+    return { x: p.x * scale, y: p.y * scale };
+  };
+  const A = at(inset, inset);
+  const B = at(1 - inset, inset);
+  const E = at(inset, 1 - inset);
   const wpx = Math.max(1, Math.round(Math.hypot(B.x - A.x, B.y - A.y)));
   const hpx = Math.max(1, Math.round(Math.hypot(E.x - A.x, E.y - A.y)));
   const out = document.createElement('canvas');
@@ -1004,15 +1014,15 @@ function binarizeCell(cell) {
  * case et se colle au chiffre. D'où ce second essai, réservé aux cas où le
  * premier découpage a visiblement mordu sur le contenu.
  */
-function extractCell(photo, mesh, r, c) {
-  const first = binarizeCell(cellCanvas(photo, mesh, r, c, 0.19));
+function extractCell(photo, mesh, r, c, scale) {
+  const first = binarizeCell(cellCanvas(photo, mesh, r, c, 0.19, scale));
   // Case jugée vide au retrait franc : on s'en tient là. Desserrer y ferait
   // entrer le quadrillage, qui se lirait comme un chiffre.
   if (!first) return null;
   if (!first.clipped) return first;
   // Contenu coupé : le découpage plus large en retient davantage, et reste
   // préférable même s'il touche encore un bord.
-  const second = binarizeCell(cellCanvas(photo, mesh, r, c, 0.10));
+  const second = binarizeCell(cellCanvas(photo, mesh, r, c, 0.10, scale));
   return second || first;
 }
 
@@ -1027,10 +1037,10 @@ function extractCell(photo, mesh, r, c) {
  *
  * @returns {{canvas:HTMLCanvasElement, slots:{x0:number,x1:number,cell:HTMLCanvasElement}[]}}
  */
-export function composeStrip(canvas, mesh, cells, cellHeight = 64, gap = 44, inset = 0.19) {
+export function composeStrip(canvas, mesh, cells, cellHeight = 64, gap = 44, scale = 1) {
   const pieces = [];
   for (const { r, c } of cells) {
-    const bin = extractCell(canvas, mesh, r, c);
+    const bin = extractCell(canvas, mesh, r, c, scale);
     if (!bin) continue;
     const tmp = document.createElement('canvas');
     tmp.width = bin.w;

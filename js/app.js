@@ -444,7 +444,7 @@ function setupCornerDrag() {
 
 $('btn-shoot').addEventListener('click', async () => {
   if (!el.video.videoWidth) return;
-  const snap = vision.toWorkingCanvas(el.video, 1400);
+  const snap = vision.toWorkingCanvas(el.video, 2400);
   camera.stop();
   await analyze(snap);
 });
@@ -454,7 +454,7 @@ el.fileInput.addEventListener('change', async () => {
   if (!file) return;
   busy('Ouverture de l’image…', 0.02);
   const bitmap = await createImageBitmap(file);
-  const snap = vision.toWorkingCanvas(bitmap, 1400);
+  const snap = vision.toWorkingCanvas(bitmap, 2400);
   bitmap.close && bitmap.close();
   el.fileInput.value = '';
   await analyze(snap);

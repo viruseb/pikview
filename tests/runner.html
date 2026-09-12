@@ -13,8 +13,7 @@ window.runPipeline = async (url) => {
   img.crossOrigin = 'anonymous';
   img.src = url;
   await img.decode();
-  const canvas = vision.toWorkingCanvas(img, 1400);
-  const res = await analyzePhoto(canvas, {
+  const res = await analyzePhoto(img, {
     ocr,
     getWorker: async () => (worker ||= await ocr.getWorker()),
   });
