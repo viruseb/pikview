@@ -42,6 +42,8 @@ const state = {
   rowClues: [],
   colClues: [],
   doubt: { rows: new Set(), cols: new Set() },
+  // Lecture concurrente, là où les deux méthodes de reconnaissance divergent.
+  alt: { rows: new Map(), cols: new Map() },
   quad: null,         // 4 coins ajustés à la main, référentiel photo
   useQuad: false,     // true dès que l'utilisateur déplace un coin
   solution: null,
@@ -136,6 +138,8 @@ async function analyze(sourceCanvas) {
   state.colClues = result.colClues;
   state.doubt.rows = result.doubtRows;
   state.doubt.cols = result.doubtCols;
+  state.alt.rows = result.altRows || new Map();
+  state.alt.cols = result.altCols || new Map();
   state.quad = overlay.quadFromMesh(result.mesh, result.split.sr, result.split.sc);
   state.useQuad = false;
 
@@ -217,16 +221,16 @@ function parseClues(text) {
 function buildEditor() {
   el.inRows.value = state.rows;
   el.inCols.value = state.cols;
-  renderClueList(el.rowClues, state.rowClues, 'L', state.doubt.rows, (i, v) => {
+  renderClueList(el.rowClues, state.rowClues, 'L', state.doubt.rows, state.alt.rows, (i, v) => {
     state.rowClues[i] = v;
   });
-  renderClueList(el.colClues, state.colClues, 'C', state.doubt.cols, (i, v) => {
+  renderClueList(el.colClues, state.colClues, 'C', state.doubt.cols, state.alt.cols, (i, v) => {
     state.colClues[i] = v;
   });
   updateSums();
 }
 
-function renderClueList(container, clues, prefix, doubtSet, onChange) {
+function renderClueList(container, clues, prefix, doubtSet, altMap, onChange) {
   container.textContent = '';
   clues.forEach((line, i) => {
     const wrap = document.createElement('div');
@@ -245,6 +249,24 @@ function renderClueList(container, clues, prefix, doubtSet, onChange) {
       updateSums();
     });
     wrap.append(label, input);
+
+    // Les deux lectures ont divergé : la concurrente est proposée d'un geste.
+    const alternative = altMap && altMap.get(i);
+    if (alternative && alternative.length) {
+      const swap = document.createElement('button');
+      swap.type = 'button';
+      swap.className = 'alt';
+      swap.textContent = alternative.join(' ');
+      swap.title = 'Autre lecture proposée — appuyez pour l\u2019adopter';
+      swap.addEventListener('click', () => {
+        const previous = parseClues(input.value);
+        input.value = swap.textContent;
+        swap.textContent = previous.join(' ');
+        onChange(i, parseClues(input.value));
+        updateSums();
+      });
+      wrap.append(swap);
+    }
     container.append(wrap);
   });
 }
@@ -263,7 +285,7 @@ function updateSums() {
   if (sr === 0 && sc === 0) bits.push('Saisissez les indices de chaque ligne et de chaque colonne.');
   else if (sr === sc) bits.push(`Sommes cohérentes : ${sr} cases à noircir.`);
   else bits.push(`Sommes différentes : ${sr} (lignes) contre ${sc} (colonnes) — il reste une erreur.`);
-  if (doubts) bits.push(`${doubts} ligne(s) à vérifier (surlignées).`);
+  if (doubts) bits.push(`${doubts} ligne(s) où les deux lectures divergent (surlignées).`);
   el.sumStatus.textContent = bits.join(' ');
   el.sumStatus.className =
     'status ' + (sr === 0 ? 'warn' : sr === sc ? (doubts ? 'warn' : 'ok') : 'bad');
@@ -281,6 +303,8 @@ function resizePuzzle(rows, cols) {
   state.colClues = fit(state.colClues, cols);
   state.doubt.rows = new Set([...state.doubt.rows].filter((i) => i < rows));
   state.doubt.cols = new Set([...state.doubt.cols].filter((i) => i < cols));
+  state.alt.rows = new Map([...state.alt.rows].filter(([i]) => i < rows));
+  state.alt.cols = new Map([...state.alt.cols].filter(([i]) => i < cols));
   buildEditor();
 }
 
@@ -485,6 +509,8 @@ $('btn-manual').addEventListener('click', () => {
   state.colClues = Array.from({ length: cols }, () => []);
   state.doubt.rows = new Set();
   state.doubt.cols = new Set();
+  state.alt.rows = new Map();
+  state.alt.cols = new Map();
   state.rows = rows;
   state.cols = cols;
   el.detectCanvas.width = el.detectCanvas.height = 0;

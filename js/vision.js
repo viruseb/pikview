@@ -865,6 +865,47 @@ export function findSplit(dens, rows, cols, minPuzzle = 4) {
   return best;
 }
 
+/**
+ * Empile les bandes de toutes les lignes d'indices en une seule planche.
+ *
+ * Tesseract y voit un bloc de texte et le lit d'un seul appel. Le gain n'est
+ * pas la vitesse — les lectures ligne par ligne sont déjà rapides — mais le
+ * fait d'obtenir une *seconde* lecture, indépendante de la première : les deux
+ * ne se trompent pas aux mêmes endroits, et leur désaccord désigne exactement
+ * les lignes à vérifier.
+ *
+ * @param {{r:number,c:number}[][]} groups cases de chaque ligne d'indices
+ * @returns {{canvas:HTMLCanvasElement, slots:{line:number,index:number,
+ *            x0:number,x1:number,y0:number,y1:number,cell:HTMLCanvasElement}[]}}
+ */
+export function composeSheet(canvas, mesh, groups, cellHeight = 64, gap = 44, scale = 1, leading = 30) {
+  const strips = groups.map((cells) => composeStrip(canvas, mesh, cells, cellHeight, gap, scale));
+  const width = Math.max(1, ...strips.map((s) => s.canvas.width));
+  const lineHeight = cellHeight + gap;
+  const out = document.createElement('canvas');
+  out.width = width + 40;
+  out.height = strips.length * (lineHeight + leading) + 40;
+  const g = out.getContext('2d', { willReadFrequently: true });
+  g.fillStyle = '#fff';
+  g.fillRect(0, 0, out.width, out.height);
+
+  const slots = [];
+  let y = 20;
+  strips.forEach((strip, line) => {
+    g.drawImage(strip.canvas, 20, y);
+    strip.slots.forEach((slot, index) => {
+      slots.push({
+        line, index,
+        x0: 20 + slot.x0, x1: 20 + slot.x1,
+        y0: y, y1: y + lineHeight,
+        cell: slot.cell,
+      });
+    });
+    y += lineHeight + leading;
+  });
+  return { canvas: out, slots, strips };
+}
+
 /** Seuil d'Otsu d'un histogramme de niveaux de gris. */
 function otsu(gray) {
   const hist = new Float64Array(256);
