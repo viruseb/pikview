@@ -54,7 +54,7 @@ const state = {
 /** Projection (u, v) → pixel de la photo, pour la grille de jeu. */
 function currentMapper() {
   if (!state.useQuad && state.mesh && state.split) {
-    return overlay.meshMapper(state.mesh, state.split.sr, state.split.sc, state.rows, state.cols);
+    return overlay.meshMapper(state.mesh, state.split.sr, state.split.sc);
   }
   return overlay.quadMapper(state.quad);
 }

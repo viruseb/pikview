@@ -528,7 +528,11 @@ export function flatten(photo, mesh, cell = 28) {
 /** Coin (i, j) du maillage. */
 export function node(mesh, i, j) {
   const C = mesh.vLines.length;
-  const k = (i * C + j) * 2;
+  // Les indices sont bornés : sans cela, une colonne hors tableau repliait la
+  // lecture sur la rangée suivante au lieu de signaler la sortie.
+  const r = Math.min(mesh.hLines.length - 1, Math.max(0, i));
+  const c = Math.min(C - 1, Math.max(0, j));
+  const k = (r * C + c) * 2;
   return { x: mesh.nodes[k], y: mesh.nodes[k + 1] };
 }
 
