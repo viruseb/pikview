@@ -22,6 +22,8 @@ window.runPipeline = async (url) => {
     error: res.error || null,
     rows: res.rows ?? 0,
     cols: res.cols ?? 0,
+    clueRows: res.split ? res.split.sr : 0,
+    clueCols: res.split ? res.split.sc : 0,
     rowClues: res.rowClues || [],
     colClues: res.colClues || [],
     doubtRows: [...(res.doubtRows || [])],

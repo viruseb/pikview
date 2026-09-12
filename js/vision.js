@@ -602,6 +602,171 @@ export function cellDensities(ink, w, h, mesh) {
 }
 
 /**
+ * Construit un maillage parfaitement régulier.
+ *
+ * Sur une image déjà aplatie, le quadrillage n'a plus à être décrit par des
+ * polylignes : il suffit d'un pas et d'une origine.
+ */
+export function regularMesh(cols, rows, cell, originX, originY, width, height) {
+  const sampleX = [0, width];
+  const sampleY = [0, height];
+  const hLines = [];
+  for (let i = 0; i <= rows; i++) {
+    const y = originY + i * cell;
+    hLines.push(Float64Array.from([y, y]));
+  }
+  const vLines = [];
+  for (let j = 0; j <= cols; j++) {
+    const x = originX + j * cell;
+    vLines.push(Float64Array.from([x, x]));
+  }
+  const nodes = new Float64Array((rows + 1) * (cols + 1) * 2);
+  for (let i = 0; i <= rows; i++) {
+    for (let j = 0; j <= cols; j++) {
+      const k = (i * (cols + 1) + j) * 2;
+      nodes[k] = originX + j * cell;
+      nodes[k + 1] = originY + i * cell;
+    }
+  }
+  return { hLines, vLines, sampleX, sampleY, rows, cols, width, height, nodes, pitchX: cell, pitchY: cell };
+}
+
+/**
+ * Construit un maillage à partir d'une fonction donnant ses nœuds.
+ *
+ * Sert à exprimer, dans le repère de la photo d'origine, un quadrillage
+ * délimité sur l'image redressée : la géométrie vient du redressement, les
+ * pixels restent ceux de la photo, qu'un second rééchantillonnage ne viendrait
+ * qu'abîmer avant l'OCR.
+ */
+export function meshFromNodes(rows, cols, getNode, width, height) {
+  const nodes = new Float64Array((rows + 1) * (cols + 1) * 2);
+  for (let i = 0; i <= rows; i++) {
+    for (let j = 0; j <= cols; j++) {
+      const p = getNode(i, j);
+      const k = (i * (cols + 1) + j) * 2;
+      nodes[k] = p.x;
+      nodes[k + 1] = p.y;
+    }
+  }
+  // Les polylignes ne servent plus qu'à porter les dimensions.
+  const hLines = Array.from({ length: rows + 1 }, () => Float64Array.of(0, 0));
+  const vLines = Array.from({ length: cols + 1 }, () => Float64Array.of(0, 0));
+  return {
+    hLines, vLines,
+    sampleX: [0, width], sampleY: [0, height],
+    rows, cols, width, height, nodes,
+  };
+}
+
+/**
+ * Cherche l'étendue du tableau sur un réseau de pas connu.
+ *
+ * Après aplatissement, le pas du quadrillage n'est plus à deviner : il vaut
+ * exactement la taille de case choisie au rééchantillonnage. Il ne reste
+ * qu'à dire quelles positions du réseau portent un vrai trait — ce qui se
+ * décide sur la longueur du plus long segment d'encre, mesuré cette fois d'un
+ * bord à l'autre de l'image et non bande par bande.
+ *
+ * C'est aussi ce qui écarte l'arrière-plan : une grille imprimée aligne des
+ * dizaines de traits consécutifs au pas exact, ce qu'un grillage de jardin ou
+ * un bord de page ne font pas.
+ *
+ * @returns {null|{i0:number,i1:number,j0:number,j1:number,
+ *                  scoreH:Float64Array,scoreV:Float64Array,
+ *                  offsetH:number,offsetV:number}}
+ */
+export function latticeExtent(ink, w, h, cell, threshold = 0.22, window = 2) {
+  // Le décalage retenu est rendu avec le score : la fenêtre de recherche vaut
+  // une fraction de case, et l'ignorer reviendrait à découper les cases de
+  // travers — assez pour rogner le haut des chiffres avant de les lire.
+  const runAlong = (k, vertical) => {
+    const pos = Math.round(k * cell);
+    const span = vertical ? h : w;
+    let best = 0;
+    let bestOffset = 0;
+    for (let d = -window; d <= window; d++) {
+      const q = pos + d;
+      if (q < 0 || q >= (vertical ? w : h)) continue;
+      let run = 0;
+      let gap = 0;
+      let longest = 0;
+      for (let t = 0; t < span; t++) {
+        const on = vertical ? ink[t * w + q] : ink[q * w + t];
+        if (on) { run += gap + 1; gap = 0; if (run > longest) longest = run; }
+        else if (++gap > 2) { run = 0; gap = 0; }
+      }
+      if (longest > best) { best = longest; bestOffset = d; }
+    }
+    return { score: best / span, offset: bestOffset };
+  };
+
+  const nV = Math.round(w / cell);
+  const nH = Math.round(h / cell);
+  const scoreV = new Float64Array(nV + 1);
+  const scoreH = new Float64Array(nH + 1);
+  const offsetV = new Float64Array(nV + 1);
+  const offsetH = new Float64Array(nH + 1);
+  for (let j = 0; j <= nV; j++) { const r = runAlong(j, true); scoreV[j] = r.score; offsetV[j] = r.offset; }
+  for (let i = 0; i <= nH; i++) { const r = runAlong(i, false); scoreH[i] = r.score; offsetH[i] = r.offset; }
+
+  // Plus longue suite de traits présents, un manque isolé toléré.
+  const longestRun = (score) => {
+    let best = null;
+    let start = -1;
+    let misses = 0;
+    for (let k = 0; k < score.length; k++) {
+      const ok = score[k] >= threshold;
+      if (ok) {
+        if (start < 0) start = k;
+        misses = 0;
+      } else if (start >= 0) {
+        if (++misses > 1) {
+          const end = k - misses;
+          if (!best || end - start > best.b - best.a) best = { a: start, b: end };
+          start = -1;
+          misses = 0;
+        }
+      }
+    }
+    if (start >= 0) {
+      const end = score.length - 1;
+      if (!best || end - start > best.b - best.a) best = { a: start, b: end };
+    }
+    return best;
+  };
+
+  // Un seul décalage, médian, estimé sur les traits francs.
+  //
+  // Corriger trait par trait s'est révélé pire que ne rien corriger : le
+  // décalage d'un trait pâle est arbitraire, et un maillage qui tremble
+  // déplace les frontières de cases au point de fausser le découpage des
+  // blocs. L'erreur du modèle étant pour l'essentiel un biais d'ensemble,
+  // une valeur unique en capte le gros sans introduire de bruit.
+  const globalOffset = (scores, offsets) => {
+    const strong = [];
+    let max = 0;
+    for (const v of scores) if (v > max) max = v;
+    for (let k = 0; k < scores.length; k++) {
+      if (scores[k] >= max * 0.5) strong.push(offsets[k]);
+    }
+    if (!strong.length) return 0;
+    strong.sort((a, b) => a - b);
+    return strong[strong.length >> 1];
+  };
+
+  const v = longestRun(scoreV);
+  const hh = longestRun(scoreH);
+  if (!v || !hh || v.b - v.a < 4 || hh.b - hh.a < 4) return null;
+  return {
+    i0: hh.a, i1: hh.b, j0: v.a, j1: v.b,
+    scoreH, scoreV,
+    offsetH: globalOffset(scoreH, offsetH),
+    offsetV: globalOffset(scoreV, offsetV),
+  };
+}
+
+/**
  * Sépare la feuille en quatre quadrants : indices de colonnes (haut/droite),
  * indices de lignes (bas/gauche), coin vide (haut/gauche) et grille de jeu
  * (bas/droite, vide elle aussi). On retient la coupure qui maximise ce

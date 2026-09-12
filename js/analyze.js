@@ -7,6 +7,10 @@
  */
 
 import * as vision from './vision.js';
+import { fitModel, modelRange, flattenByModel } from './rectify.js';
+
+/** Taille d'une case sur l'image aplatie, en pixels. */
+const CELL = 26;
 
 /**
  * Extrait le masque d'encre de la photo.
@@ -25,62 +29,120 @@ export function prepare(sourceCanvas) {
 
 /**
  * Localise le tableau et sépare les blocs d'indices de la grille de jeu.
- * @returns {null|{mesh:object, split:object, dens:Float32Array, rows:number, cols:number}}
+ *
+ * En deux temps. La première passe suit les traits à leur pente locale, ce qui
+ * donne un maillage souvent incomplet — les traits imprimés pâles ne
+ * rassemblent, bande par bande, qu'une fraction de leur longueur. Ce maillage
+ * partiel suffit à ajuster le modèle de cylindre généralisé, qui décrit la
+ * déformation de la page entière. On aplatit la photo d'après lui : les traits
+ * deviennent droits d'un bord à l'autre, le pas est connu exactement, et la
+ * seconde passe n'a plus qu'à dire jusqu'où va le tableau.
+ *
+ * @returns {null|{photo:HTMLCanvasElement, ink:Uint8Array, mesh:object, split:object,
+ *                 dens:Float32Array, rows:number, cols:number, flattened:boolean}}
  */
-export function locateGrid(ink, w, h) {
+export function locateGrid(photo, ink, w, h) {
   const mesh = vision.detectMesh(ink, w, h);
   if (!mesh || mesh.cols < 5 || mesh.rows < 5) return null;
+
+  const rectified = rectifyToLattice(photo, mesh, w, h);
+  if (rectified) {
+    const dens = vision.cellDensities(ink, w, h, rectified.mesh);
+    const split = vision.findSplit(dens, rectified.mesh.rows, rectified.mesh.cols);
+    if (split) {
+      return {
+        photo,
+        ink,
+        mesh: rectified.mesh,
+        dens,
+        split,
+        cols: rectified.mesh.cols - split.sc,
+        rows: rectified.mesh.rows - split.sr,
+        flattened: true,
+      };
+    }
+  }
+
+  // Repli : on se contente du maillage de la première passe.
   const dens = vision.cellDensities(ink, w, h, mesh);
   const split = vision.findSplit(dens, mesh.rows, mesh.cols);
   if (!split) return null;
   return {
+    photo,
+    ink,
     mesh,
-    split,
     dens,
+    split,
     cols: mesh.cols - split.sc,
     rows: mesh.rows - split.sr,
+    flattened: false,
   };
 }
 
 /**
- * Repère les cases d'indices non vides, ligne par ligne et colonne par
- * colonne, dans l'ordre de lecture.
+ * Aplatit la photo d'après le modèle, y délimite le tableau, puis ramène ce
+ * quadrillage dans le repère de la photo d'origine.
+ *
+ * L'image aplatie ne sert qu'à la géométrie. Les cases sont ensuite découpées
+ * dans la photo elle-même : un second rééchantillonnage flouterait les
+ * chiffres imprimés juste avant de les donner à lire.
  */
-export function clueCells({ mesh, split, dens, rows, cols }) {
-  // Seuil « case non vide » : une fraction de la densité moyenne des cases
-  // franchement encrées, pour rester valable quel que soit le contraste.
-  const clueDens = [];
-  for (let r = 0; r < mesh.rows; r++) {
-    for (let c = 0; c < mesh.cols; c++) {
-      const inTop = r < split.sr && c >= split.sc;
-      const inLeft = r >= split.sr && c < split.sc;
-      if (inTop || inLeft) clueDens.push(dens[r * mesh.cols + c]);
-    }
-  }
-  clueDens.sort((a, b) => b - a);
-  const strong = clueDens.slice(0, Math.max(1, Math.round(clueDens.length * 0.35)));
-  const threshold = Math.max(
-    0.012,
-    (strong.reduce((a, b) => a + b, 0) / strong.length) * 0.38
-  );
+function rectifyToLattice(photo, mesh, w, h) {
+  const model = fitModel(mesh);
+  if (!model) return null;
+  const range = modelRange(model, w, h);
+  const flat = flattenByModel(photo, model, range, CELL);
+  if (!flat) return null;
 
+  const { gray, w: fw, h: fh } = vision.toGray(flat.canvas);
+  const flatInk = vision.adaptiveThreshold(gray, fw, fh, Math.max(8, Math.round(Math.min(fw, fh) / 45)), 9);
+  // La fenêtre de recherche vaut près d'un quart de case : les rangées
+  // extrapolées au-delà du maillage détecté dérivent de quelques pixels, et
+  // une fenêtre trop étroite les manquait — c'est tout le bloc d'indices du
+  // haut qui disparaissait alors.
+  const extent = vision.latticeExtent(flatInk, fw, fh, CELL, 0.14, Math.max(2, Math.round(CELL * 0.23)));
+  if (!extent) return null;
+
+  const cols = extent.j1 - extent.j0;
+  const rows = extent.i1 - extent.i0;
+  if (cols < 6 || rows < 6) return null;
+
+  // Le réseau est recalé sur le décalage médian mesuré, converti en fraction
+  // d'indice.
+  const sourceMesh = vision.meshFromNodes(
+    rows, cols,
+    (i, j) => model.node(
+      range.i0 + extent.i0 + i + extent.offsetH / CELL,
+      range.j0 + extent.j0 + j + extent.offsetV / CELL
+    ),
+    w, h
+  );
+  return { mesh: sourceMesh, model, flat };
+}
+
+/**
+ * Énumère les cases d'indices, dans l'ordre de lecture.
+ *
+ * Toutes les cases du bloc sont rendues, y compris les vides. Décider ici
+ * qu'une case est vide sur un seuil de densité global s'est révélé fragile :
+ * sur une photo un peu terne, les indices du haut passaient sous le seuil et
+ * disparaissaient. Le tri revient à `composeStrip`, qui juge chaque case sur
+ * son propre contraste, au moment où il la binarise.
+ */
+export function clueCells({ mesh, split, rows, cols }) {
   const rowCells = [];
   for (let r = 0; r < rows; r++) {
     const cells = [];
-    for (let c = 0; c < split.sc; c++) {
-      if (dens[(split.sr + r) * mesh.cols + c] >= threshold) cells.push({ r: split.sr + r, c });
-    }
+    for (let c = 0; c < split.sc; c++) cells.push({ r: split.sr + r, c });
     rowCells.push(cells);
   }
   const colCells = [];
   for (let c = 0; c < cols; c++) {
     const cells = [];
-    for (let r = 0; r < split.sr; r++) {
-      if (dens[r * mesh.cols + split.sc + c] >= threshold) cells.push({ r, c: split.sc + c });
-    }
+    for (let r = 0; r < split.sr; r++) cells.push({ r, c: split.sc + c });
     colCells.push(cells);
   }
-  return { rowCells, colCells, threshold };
+  return { rowCells, colCells };
 }
 
 /**
@@ -115,14 +177,17 @@ export async function analyzePhoto(sourceCanvas, opts) {
 
   onProgress({ text: 'Détection du quadrillage…', value: 0.15 });
   await nextTick();
-  const located = locateGrid(ink, w, h);
+  const located = locateGrid(photo, ink, w, h);
   if (!located) return { photo, error: 'grid-not-found' };
 
   const { mesh, split, rows, cols } = located;
   const { rowCells, colCells } = clueCells(located);
 
   const result = {
-    photo,
+    split,
+    // L'image de travail est la photo redressée quand la rectification a
+    // abouti : la superposition y tombe juste par construction.
+    photo: located.photo,
     mesh,
     split,
     rows,
@@ -151,7 +216,7 @@ export async function analyzePhoto(sourceCanvas, opts) {
       if (cancelled()) return;
       const cells = groups[i];
       if (!cells.length) { out[i] = []; doubt.add(i); done++; continue; }
-      const strip = vision.composeStrip(photo, mesh, cells);
+      const strip = vision.composeStrip(located.photo, mesh, cells);
       const read = strip.slots.length
         ? await ocr.readStrip(worker, strip)
         : { values: [], confidence: 0, minConfidence: 0 };

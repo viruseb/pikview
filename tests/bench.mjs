@@ -108,7 +108,7 @@ function score(got, expected) {
   if (got.error) return { grid: got.error, lignes: '', colonnes: '', signalé: '' };
   if (!expected) {
     return {
-      grid: `${got.cols}x${got.rows}`,
+      grid: `${got.cols}x${got.rows} bloc ${got.clueCols}x${got.clueRows}`,
       lignes: `? (${got.rowClues.length})`,
       colonnes: `? (${got.colClues.length})`,
       signalé: `${got.doubtRows.length + got.doubtCols.length}`,
@@ -121,7 +121,7 @@ function score(got, expected) {
   const wrongR = got.rowClues.map((c, i) => !same(c, expected.rowClues[i] || [])).map((bad, i) => bad && !got.doubtRows.includes(i));
   const wrongC = got.colClues.map((c, i) => !same(c, expected.colClues[i] || [])).map((bad, i) => bad && !got.doubtCols.includes(i));
   return {
-    grid: gridOk ? 'ok' : `${got.cols}x${got.rows} ≠ ${expected.cols}x${expected.rows}`,
+    grid: gridOk ? `ok bloc ${got.clueCols}x${got.clueRows}` : `${got.cols}x${got.rows} ≠ ${expected.cols}x${expected.rows}`,
     lignes: `${rOk}/${expected.rows}`,
     colonnes: `${cOk}/${expected.cols}`,
     'fausses non signalées': wrongR.filter(Boolean).length + wrongC.filter(Boolean).length,
