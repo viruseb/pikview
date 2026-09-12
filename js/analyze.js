@@ -96,24 +96,66 @@ function rectifyToLattice(photo, mesh, w, h) {
 
   const { gray, w: fw, h: fh } = vision.toGray(flat.canvas);
   const flatInk = vision.adaptiveThreshold(gray, fw, fh, Math.max(8, Math.round(Math.min(fw, fh) / 45)), 9);
+
   // La fenêtre de recherche vaut près d'un quart de case : les rangées
   // extrapolées au-delà du maillage détecté dérivent de quelques pixels, et
   // une fenêtre trop étroite les manquait — c'est tout le bloc d'indices du
   // haut qui disparaissait alors.
   const extent = vision.latticeExtent(flatInk, fw, fh, CELL, 0.14, Math.max(2, Math.round(CELL * 0.23)));
   if (!extent) return null;
+  if (extent.j1 - extent.j0 < 6 || extent.i1 - extent.i0 < 6) return null;
 
+  // Recadrage sur le tableau, puis nouvelle détection.
+  //
+  // Supposer le quadrillage parfaitement régulier ne suffisait pas : le modèle
+  // dérive de quelques pixels là où il extrapole, assez pour rogner le haut
+  // des chiffres et faire entrer un coin de quadrillage dans les cases vides.
+  // Sur l'image recadrée, les traits sont droits, entiers et sans
+  // arrière-plan : les mesurer vaut mieux que les supposer.
+  const margin = Math.round(CELL * 0.6);
+  const x0 = Math.max(0, Math.round(extent.j0 * CELL) - margin);
+  const y0 = Math.max(0, Math.round(extent.i0 * CELL) - margin);
+  const x1 = Math.min(fw, Math.round(extent.j1 * CELL) + margin);
+  const y1 = Math.min(fh, Math.round(extent.i1 * CELL) + margin);
+  const crop = document.createElement('canvas');
+  crop.width = x1 - x0;
+  crop.height = y1 - y0;
+  crop.getContext('2d', { willReadFrequently: true })
+    .drawImage(flat.canvas, x0, y0, crop.width, crop.height, 0, 0, crop.width, crop.height);
+
+  const cropGray = vision.toGray(crop);
+  const cropInk = vision.adaptiveThreshold(
+    cropGray.gray, cropGray.w, cropGray.h,
+    Math.max(8, Math.round(Math.min(cropGray.w, cropGray.h) / 45)), 9
+  );
+  const cropMesh = vision.detectMesh(cropInk, cropGray.w, cropGray.h);
+
+  const toIndex = (x, y) => ({
+    i: range.i0 + (y0 + y) / CELL,
+    j: range.j0 + (x0 + x) / CELL,
+  });
+
+  if (cropMesh && cropMesh.cols >= 6 && cropMesh.rows >= 6) {
+    const sourceMesh = vision.meshFromNodes(
+      cropMesh.rows, cropMesh.cols,
+      (i, j) => {
+        const p = vision.node(cropMesh, i, j);
+        const k = toIndex(p.x, p.y);
+        return model.node(k.i, k.j);
+      },
+      w, h
+    );
+    return { mesh: sourceMesh, model, flat };
+  }
+
+  // Repli : le réseau régulier, recalé sur la tendance des décalages mesurés.
   const cols = extent.j1 - extent.j0;
   const rows = extent.i1 - extent.i0;
-  if (cols < 6 || rows < 6) return null;
-
-  // Le réseau est recalé sur le décalage médian mesuré, converti en fraction
-  // d'indice.
   const sourceMesh = vision.meshFromNodes(
     rows, cols,
     (i, j) => model.node(
-      range.i0 + extent.i0 + i + extent.offsetH / CELL,
-      range.j0 + extent.j0 + j + extent.offsetV / CELL
+      range.i0 + extent.i0 + i + extent.offsetH[extent.i0 + i] / CELL,
+      range.j0 + extent.j0 + j + extent.offsetV[extent.j0 + j] / CELL
     ),
     w, h
   );

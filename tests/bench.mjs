@@ -51,6 +51,8 @@ const server = createServer(async (req, res) => {
 await new Promise((r) => server.listen(0, '127.0.0.1', r));
 const base = `http://127.0.0.1:${server.address().port}`;
 
+const { solvePuzzle, validateClues } = await import(new URL('../js/solver.js', import.meta.url));
+
 const { chromium } = await import(
   process.env.PLAYWRIGHT_MODULE || '/opt/node22/lib/node_modules/playwright/index.mjs'
 ).catch(() => import('playwright'));
@@ -81,7 +83,7 @@ for (const file of files) {
     expected = JSON.parse(await readFile(join(FIXTURES, file.replace(/\.jpg$/, '.expected.json')), 'utf8'));
   } catch { /* pas encore de référence */ }
 
-  const line = { file, ms, ...score(got, expected) };
+  const line = { file, ms, ...score(got, expected), ...solvability(got) };
   rows.push(line);
 
   if (DUMP) {
@@ -99,6 +101,23 @@ server.close();
 
 const failed = rows.filter((r) => r.grid !== 'ok' || (r.lignes && !r.lignes.startsWith(r.lignes.split('/')[1])));
 process.exitCode = rows.some((r) => r.grid !== 'ok') ? 1 : 0;
+
+/**
+ * Contrôle sans référence : des indices dont les sommes concordent et qui
+ * donnent une solution unique sont presque sûrement bien lus. Une grille
+ * publiée est unique par construction ; une erreur de lecture la rend
+ * contradictoire ou ambiguë presque à coup sûr.
+ */
+function solvability(got) {
+  if (got.error || !got.rowClues.length || !got.colClues.length) return { résolution: '—' };
+  const sr = got.rowClues.reduce((a, l) => a + l.reduce((x, y) => x + y, 0), 0);
+  const sc = got.colClues.reduce((a, l) => a + l.reduce((x, y) => x + y, 0), 0);
+  if (sr !== sc) return { résolution: `sommes ${sr}≠${sc}` };
+  const bad = validateClues(got.rowClues, got.colClues);
+  if (bad) return { résolution: 'indices invalides' };
+  const res = solvePuzzle(got.rowClues, got.colClues, { timeLimitMs: 15000, uniqueCheckMs: 3000 });
+  return { résolution: res.status === 'solved' ? '✓ unique' : res.status };
+}
 
 function same(a, b) {
   return Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((v, i) => v === b[i]);

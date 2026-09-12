@@ -674,7 +674,7 @@ export function meshFromNodes(rows, cols, getNode, width, height) {
  *
  * @returns {null|{i0:number,i1:number,j0:number,j1:number,
  *                  scoreH:Float64Array,scoreV:Float64Array,
- *                  offsetH:number,offsetV:number}}
+ *                  offsetH:Float64Array,offsetV:Float64Array}}
  */
 export function latticeExtent(ink, w, h, cell, threshold = 0.22, window = 2) {
   // Le décalage retenu est rendu avec le score : la fenêtre de recherche vaut
@@ -736,23 +736,75 @@ export function latticeExtent(ink, w, h, cell, threshold = 0.22, window = 2) {
     return best;
   };
 
-  // Un seul décalage, médian, estimé sur les traits francs.
+  // Le recalage suit la tendance des décalages, ajustée sur les seuls traits
+  // francs.
   //
-  // Corriger trait par trait s'est révélé pire que ne rien corriger : le
-  // décalage d'un trait pâle est arbitraire, et un maillage qui tremble
-  // déplace les frontières de cases au point de fausser le découpage des
-  // blocs. L'erreur du modèle étant pour l'essentiel un biais d'ensemble,
-  // une valeur unique en capte le gros sans introduire de bruit.
-  const globalOffset = (scores, offsets) => {
-    const strong = [];
+  // Un décalage unique ne suffit pas : l'erreur du modèle n'est pas un biais
+  // constant mais une dérive, qui s'accentue dans les rangées extrapolées
+  // au-delà du maillage détecté — précisément le bloc d'indices du haut. Les
+  // chiffres y étaient rognés et les cases vides ramassaient des coins de
+  // quadrillage. Corriger trait par trait, en revanche, fait trembler le
+  // maillage, le décalage d'un trait pâle étant arbitraire : d'où un
+  // ajustement polynomial de degré 2, pondéré par la seule présence de traits
+  // francs, qui capte la dérive sans en épouser le bruit.
+  const trend = (scores, offsets) => {
     let max = 0;
     for (const v of scores) if (v > max) max = v;
+    const ts = [];
+    const ys = [];
     for (let k = 0; k < scores.length; k++) {
-      if (scores[k] >= max * 0.5) strong.push(offsets[k]);
+      if (scores[k] >= max * 0.5) { ts.push(k); ys.push(offsets[k]); }
     }
-    if (!strong.length) return 0;
-    strong.sort((a, b) => a - b);
-    return strong[strong.length >> 1];
+    const out = new Float64Array(scores.length);
+    if (ts.length < 4) {
+      if (!ts.length) return out;
+      const sorted = [...ys].sort((a, b) => a - b);
+      out.fill(sorted[sorted.length >> 1]);
+      return out;
+    }
+    const degree = ts.length >= 8 ? 2 : 1;
+    const m = degree + 1;
+    const A = new Float64Array(m * m);
+    const rhs = new Float64Array(m);
+    for (let k = 0; k < ts.length; k++) {
+      const pow = [1, ts[k], ts[k] * ts[k]];
+      for (let i = 0; i < m; i++) {
+        rhs[i] += pow[i] * ys[k];
+        for (let j = 0; j < m; j++) A[i * m + j] += pow[i] * pow[j];
+      }
+    }
+    for (let i = 0; i < m; i++) {
+      let piv = i;
+      for (let r = i + 1; r < m; r++) if (Math.abs(A[r * m + i]) > Math.abs(A[piv * m + i])) piv = r;
+      if (Math.abs(A[piv * m + i]) < 1e-9) return out;
+      if (piv !== i) {
+        for (let c = 0; c < m; c++) { const t = A[i * m + c]; A[i * m + c] = A[piv * m + c]; A[piv * m + c] = t; }
+        const t = rhs[i]; rhs[i] = rhs[piv]; rhs[piv] = t;
+      }
+      for (let r = i + 1; r < m; r++) {
+        const f = A[r * m + i] / A[i * m + i];
+        for (let c = i; c < m; c++) A[r * m + c] -= f * A[i * m + c];
+        rhs[r] -= f * rhs[i];
+      }
+    }
+    const coef = new Float64Array(m);
+    for (let i = m - 1; i >= 0; i--) {
+      let acc = rhs[i];
+      for (let j = i + 1; j < m; j++) acc -= A[i * m + j] * coef[j];
+      coef[i] = acc / A[i * m + i];
+    }
+    // Hors de la plage ajustée, la tendance est gelée : extrapoler un
+    // polynôme loin de ses appuis diverge vite.
+    const first = ts[0];
+    const last = ts[ts.length - 1];
+    const evalAt = (t) => {
+      const u = Math.min(last, Math.max(first, t));
+      let acc = 0;
+      for (let i = m - 1; i >= 0; i--) acc = acc * u + coef[i];
+      return acc;
+    };
+    for (let k = 0; k < scores.length; k++) out[k] = evalAt(k);
+    return out;
   };
 
   const v = longestRun(scoreV);
@@ -761,8 +813,8 @@ export function latticeExtent(ink, w, h, cell, threshold = 0.22, window = 2) {
   return {
     i0: hh.a, i1: hh.b, j0: v.a, j1: v.b,
     scoreH, scoreV,
-    offsetH: globalOffset(scoreH, offsetH),
-    offsetV: globalOffset(scoreV, offsetV),
+    offsetH: trend(scoreH, offsetH),
+    offsetV: trend(scoreV, offsetV),
   };
 }
 
