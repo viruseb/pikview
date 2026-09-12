@@ -1,12 +1,13 @@
 /* Service worker : coque applicative hors ligne + cache des ressources CDN. */
 
-const VERSION = 'pikview-v1';
+const VERSION = 'pikview-v2';
 const SHELL = [
   './',
   'index.html',
   'styles.css',
   'manifest.webmanifest',
   'js/app.js',
+  'js/analyze.js',
   'js/camera.js',
   'js/vision.js',
   'js/ocr.js',

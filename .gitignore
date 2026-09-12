@@ -1,3 +1,6 @@
 # Fichiers de test locaux (photos d'essai, moteur OCR auto-hébergé)
 _test-*/
 _test-*
+
+# Moteur OCR téléchargé pour le banc de test
+tests/ocr/

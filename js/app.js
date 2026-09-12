@@ -2,6 +2,7 @@ import * as camera from './camera.js';
 import * as vision from './vision.js';
 import * as ocr from './ocr.js';
 import * as overlay from './overlay.js';
+import { analyzePhoto } from './analyze.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -104,142 +105,53 @@ async function startCamera() {
 
 async function analyze(sourceCanvas) {
   cancelled = false;
-  busy('Redressement de l’image…', 0.05);
-  await nextFrame();
+  const result = await analyzePhoto(sourceCanvas, {
+    ocr,
+    getWorker: () =>
+      ocr.getWorker((m) => {
+        if (m.status && m.status.includes('loading')) {
+          busy('Chargement du moteur de lecture…', 0.2 + (m.progress || 0) * 0.1);
+        }
+      }),
+    onProgress: ({ text, value }) => busy(text, value),
+    cancelled: () => cancelled,
+  });
 
-  let work = sourceCanvas;
-  let { gray, w, h } = vision.toGray(work);
-  let ink = vision.adaptiveThreshold(gray, w, h, Math.max(8, Math.round(Math.min(w, h) / 45)), 9);
+  state.photo = result.photo || null;
 
-  const angle = vision.estimateSkew(ink, w, h);
-  if (Math.abs(angle) > 0.0015) {
-    work = vision.rotateCanvas(work, -angle);
-    ({ gray, w, h } = vision.toGray(work));
-    ink = vision.adaptiveThreshold(gray, w, h, Math.max(8, Math.round(Math.min(w, h) / 45)), 9);
-  }
-  state.photo = work;
-
-  busy('Détection du quadrillage…', 0.15);
-  await nextFrame();
-  const mesh = vision.detectMesh(ink, w, h);
-  if (!mesh || mesh.cols < 5 || mesh.rows < 5) {
+  if (result.error === 'grid-not-found') {
     idle();
     alert(
-      "Quadrillage introuvable. Reprenez la photo bien à plat, avec un bon éclairage " +
+      'Quadrillage introuvable. Reprenez la photo bien à plat, avec un bon éclairage ' +
       'et toute la grille dans le cadre — ou utilisez la saisie manuelle.'
     );
     return false;
   }
-  state.mesh = mesh;
 
-  const dens = vision.cellDensities(ink, w, h, mesh);
-  const split = vision.findSplit(dens, mesh.rows, mesh.cols);
-  if (!split) {
-    idle();
-    alert('Impossible de distinguer les indices de la grille de jeu. Essayez la saisie manuelle.');
-    return false;
-  }
-  state.split = split;
-  state.cols = mesh.cols - split.sc;
-  state.rows = mesh.rows - split.sr;
-  state.quad = overlay.quadFromMesh(mesh, split.sr, split.sc);
+  state.mesh = result.mesh;
+  state.split = result.split;
+  state.rows = result.rows;
+  state.cols = result.cols;
+  state.rowClues = result.rowClues;
+  state.colClues = result.colClues;
+  state.doubt.rows = result.doubtRows;
+  state.doubt.cols = result.doubtCols;
+  state.quad = overlay.quadFromMesh(result.mesh, result.split.sr, result.split.sc);
   state.useQuad = false;
 
   drawDetection();
+  idle();
 
-  // Seuil « case non vide » : moitié de la densité moyenne des cases encrées.
-  const clueDens = [];
-  for (let r = 0; r < mesh.rows; r++) {
-    for (let c = 0; c < mesh.cols; c++) {
-      const inTop = r < split.sr && c >= split.sc;
-      const inLeft = r >= split.sr && c < split.sc;
-      if (inTop || inLeft) clueDens.push(dens[r * mesh.cols + c]);
-    }
-  }
-  clueDens.sort((a, b) => b - a);
-  const strong = clueDens.slice(0, Math.max(1, Math.round(clueDens.length * 0.35)));
-  const inkThreshold = Math.max(
-    0.012,
-    (strong.reduce((a, b) => a + b, 0) / strong.length) * 0.38
-  );
-
-  const rowCells = [];
-  for (let r = 0; r < state.rows; r++) {
-    const cells = [];
-    for (let c = 0; c < split.sc; c++) {
-      if (dens[(split.sr + r) * mesh.cols + c] >= inkThreshold) cells.push({ r: split.sr + r, c });
-    }
-    rowCells.push(cells);
-  }
-  const colCells = [];
-  for (let c = 0; c < state.cols; c++) {
-    const cells = [];
-    for (let r = 0; r < split.sr; r++) {
-      if (dens[r * mesh.cols + split.sc + c] >= inkThreshold) cells.push({ r, c: split.sc + c });
-    }
-    colCells.push(cells);
-  }
-
-  state.rowClues = rowCells.map(() => []);
-  state.colClues = colCells.map(() => []);
-  state.doubt.rows = new Set();
-  state.doubt.cols = new Set();
-
-  const total = rowCells.length + colCells.length;
-  let done = 0;
-  let worker = null;
-  try {
-    busy('Chargement du moteur de lecture…', 0.2);
-    worker = await ocr.getWorker((m) => {
-      if (m.status && m.status.includes('loading')) {
-        busy('Chargement du moteur de lecture…', 0.2 + (m.progress || 0) * 0.1);
-      }
-    });
-  } catch (err) {
-    idle();
+  if (result.error === 'ocr-unavailable') {
     buildEditor();
     show('review');
-    const reason = (err && err.message) || 'Moteur de reconnaissance indisponible.';
     alert(
-      `${reason}\n\nLes indices n'ont pas pu être lus automatiquement : ` +
+      `${result.errorMessage}\n\nLes indices n'ont pas pu être lus automatiquement : ` +
       'saisissez-les à la main ci-dessous. La grille détectée reste utilisée pour la superposition.'
     );
     return true;
   }
 
-  const readGroup = async (groups, out, doubt, label, lineLength) => {
-    for (let i = 0; i < groups.length; i++) {
-      if (cancelled) return;
-      const cells = groups[i];
-      if (!cells.length) { out[i] = []; doubt.add(i); done++; continue; }
-      const strip = vision.composeStrip(state.photo, mesh, cells);
-      const read = strip.slots.length
-        ? await ocr.readStrip(worker, strip)
-        : { values: [], confidence: 0 };
-      const clues = read.values.filter((v) => v !== null);
-      out[i] = clues;
-      // Une ligne est douteuse si une case n'a rien donné, si l'OCR hésite, ou
-      // si les indices lus ne peuvent tout simplement pas tenir dans la ligne.
-      const minLen = clues.reduce((a, b) => a + b, 0) + Math.max(0, clues.length - 1);
-      if (
-        !read.values.length ||
-        read.values.some((v) => v === null) ||
-        clues.some((v) => v > lineLength) ||
-        minLen > lineLength ||
-        read.minConfidence < 85
-      ) {
-        doubt.add(i);
-      }
-      done++;
-      busy(`Lecture des indices ${label} ${i + 1}/${groups.length}…`, 0.3 + (done / total) * 0.68);
-      if (i % 3 === 0) await nextFrame();
-    }
-  };
-
-  await readGroup(rowCells, state.rowClues, state.doubt.rows, 'de lignes', state.cols);
-  await readGroup(colCells, state.colClues, state.doubt.cols, 'de colonnes', state.rows);
-
-  idle();
   if (cancelled) return false;
   buildEditor();
   show('review');
