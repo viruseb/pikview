@@ -19,19 +19,28 @@ export function quadMapper(quad) {
 /**
  * Projection (u, v) → pixel en suivant le maillage détecté : chaque case
  * garde sa forme réelle, courbure de la page comprise.
+ *
+ * (u, v) parcourt la table telle qu'elle a été détectée, indépendamment du
+ * nombre de cases qu'on lui attribue. Compter une case de plus resserre le
+ * découpage ; cela ne déplace pas le cadre et ne fait pas sortir la lecture
+ * du maillage — l'ancienne version avançait d'une maille par case et, dès
+ * que la taille corrigée dépassait la détection, lisait au-delà du tableau,
+ * ce qui repliait les coins sur la rangée suivante.
  */
-export function meshMapper(mesh, sr, sc, rows, cols) {
+export function meshMapper(mesh, sr, sc) {
+  const R = mesh.hLines.length - 1;
+  const C = mesh.vLines.length - 1;
   return (u, v) => {
-    const fc = Math.min(cols, Math.max(0, u * cols));
-    const fr = Math.min(rows, Math.max(0, v * rows));
-    const j = Math.min(cols - 1, Math.floor(fc));
-    const i = Math.min(rows - 1, Math.floor(fr));
+    const fc = sc + Math.min(1, Math.max(0, u)) * (C - sc);
+    const fr = sr + Math.min(1, Math.max(0, v)) * (R - sr);
+    const j = Math.min(C - 1, Math.floor(fc));
+    const i = Math.min(R - 1, Math.floor(fr));
     const tu = fc - j;
     const tv = fr - i;
-    const a = node(mesh, sr + i, sc + j);
-    const b = node(mesh, sr + i, sc + j + 1);
-    const d = node(mesh, sr + i + 1, sc + j + 1);
-    const e = node(mesh, sr + i + 1, sc + j);
+    const a = node(mesh, i, j);
+    const b = node(mesh, i, j + 1);
+    const d = node(mesh, i + 1, j + 1);
+    const e = node(mesh, i + 1, j);
     const top = { x: a.x + (b.x - a.x) * tu, y: a.y + (b.y - a.y) * tu };
     const bot = { x: e.x + (d.x - e.x) * tu, y: e.y + (d.y - e.y) * tu };
     return { x: top.x + (bot.x - top.x) * tv, y: top.y + (bot.y - top.y) * tv };

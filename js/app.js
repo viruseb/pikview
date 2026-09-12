@@ -44,6 +44,8 @@ const state = {
   doubt: { rows: new Set(), cols: new Set() },
   // Lecture concurrente, là où les deux méthodes de reconnaissance divergent.
   alt: { rows: new Map(), cols: new Map() },
+  // Vignette de chaque ligne d'indices, telle qu'elle a été lue.
+  images: { rows: [], cols: [] },
   quad: null,         // 4 coins ajustés à la main, référentiel photo
   useQuad: false,     // true dès que l'utilisateur déplace un coin
   solution: null,
@@ -52,7 +54,7 @@ const state = {
 /** Projection (u, v) → pixel de la photo, pour la grille de jeu. */
 function currentMapper() {
   if (!state.useQuad && state.mesh && state.split) {
-    return overlay.meshMapper(state.mesh, state.split.sr, state.split.sc, state.rows, state.cols);
+    return overlay.meshMapper(state.mesh, state.split.sr, state.split.sc);
   }
   return overlay.quadMapper(state.quad);
 }
@@ -140,6 +142,8 @@ async function analyze(sourceCanvas) {
   state.doubt.cols = result.doubtCols;
   state.alt.rows = result.altRows || new Map();
   state.alt.cols = result.altCols || new Map();
+  state.images.rows = result.rowImages || [];
+  state.images.cols = result.colImages || [];
   state.quad = overlay.quadFromMesh(result.mesh, result.split.sr, result.split.sc);
   state.useQuad = false;
 
@@ -221,22 +225,34 @@ function parseClues(text) {
 function buildEditor() {
   el.inRows.value = state.rows;
   el.inCols.value = state.cols;
-  renderClueList(el.rowClues, state.rowClues, 'L', state.doubt.rows, state.alt.rows, (i, v) => {
+  renderClueList(el.rowClues, state.rowClues, 'L', state.doubt.rows, state.alt.rows, state.images.rows, (i, v) => {
     state.rowClues[i] = v;
   });
-  renderClueList(el.colClues, state.colClues, 'C', state.doubt.cols, state.alt.cols, (i, v) => {
+  renderClueList(el.colClues, state.colClues, 'C', state.doubt.cols, state.alt.cols, state.images.cols, (i, v) => {
     state.colClues[i] = v;
   });
   updateSums();
 }
 
-function renderClueList(container, clues, prefix, doubtSet, altMap, onChange) {
+function renderClueList(container, clues, prefix, doubtSet, altMap, images, onChange) {
   container.textContent = '';
   clues.forEach((line, i) => {
     const wrap = document.createElement('div');
     wrap.className = 'clue' + (doubtSet.has(i) ? ' doubt' : '');
     const label = document.createElement('span');
     label.textContent = `${prefix}${i + 1}`;
+
+    // La bande telle que l'OCR l'a vue, au-dessus du champ : c'est elle qui
+    // permet de trancher sans rouvrir le magazine.
+    const source = images && images[i];
+    if (source) {
+      const img = document.createElement('img');
+      img.className = 'scan';
+      img.src = source;
+      img.alt = `Indices lus pour ${prefix}${i + 1}`;
+      img.loading = 'lazy';
+      wrap.append(img);
+    }
     const input = document.createElement('input');
     input.type = 'text';
     input.inputMode = 'numeric';
@@ -565,6 +581,8 @@ $('btn-manual').addEventListener('click', () => {
   state.doubt.cols = new Set();
   state.alt.rows = new Map();
   state.alt.cols = new Map();
+  state.images.rows = [];
+  state.images.cols = [];
   state.rows = rows;
   state.cols = cols;
   el.detectCanvas.width = el.detectCanvas.height = 0;
