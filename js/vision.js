@@ -339,14 +339,21 @@ export function detectMesh(ink, w, h, strips = 12) {
     // toute la photo. Un écart n'est accepté que s'il vaut une à trois fois le
     // pas : de quoi tolérer un trait pâle manqué, pas de quoi franchir une
     // marge blanche.
+    //
+    // Le pas est comparé à une estimation glissante, pas à une valeur unique :
+    // vue de biais, une page voit son pas dériver d'un bout à l'autre, et un
+    // seuil global finirait par couper la suite en plein milieu du tableau.
     const runs = [[0]];
+    let localStep = step;
     for (let i = 1; i < positions.length; i++) {
       const gap = positions[i] - positions[i - 1];
-      const k = Math.round(gap / step);
-      if (k >= 1 && k <= 3 && Math.abs(gap / k - step) < step * 0.18) {
+      const k = Math.round(gap / localStep);
+      if (k >= 1 && k <= 3 && Math.abs(gap / k - localStep) < localStep * 0.18) {
         runs[runs.length - 1].push(i);
+        localStep = localStep * 0.7 + (gap / k) * 0.3;
       } else {
         runs.push([i]);
+        localStep = step;
       }
     }
     const best = runs.reduce((a, b) => (b.length > a.length ? b : a));
@@ -435,6 +442,74 @@ function computeNodes(mesh) {
     }
   }
   return nodes;
+}
+
+/**
+ * Aplatit la photo d'après un maillage : chaque case du maillage est
+ * rééchantillonnée vers une case carrée de `cell` pixels.
+ *
+ * L'intérêt n'est pas cosmétique. Une détection par bandes ne rassemble, pour
+ * un trait donné, qu'une fraction de sa longueur à la fois — assez pour un
+ * trait franc, trop peu pour les traits gris pâle d'une grille imprimée. Une
+ * fois la page aplatie, un trait horizontal l'est sur toute la largeur : une
+ * seconde détection accumule alors la preuve d'un bout à l'autre et retrouve
+ * les traits que la première avait manqués.
+ *
+ * Le maillage de départ n'a donc pas besoin d'être complet, seulement d'être
+ * juste là où il existe : il ne sert qu'à décrire la déformation.
+ *
+ * @returns {{canvas:HTMLCanvasElement, cell:number, toSource:(x:number,y:number)=>{x:number,y:number}}}
+ */
+export function flatten(photo, mesh, cell = 28) {
+  const R = mesh.hLines.length - 1;
+  const C = mesh.vLines.length - 1;
+  const out = document.createElement('canvas');
+  out.width = C * cell;
+  out.height = R * cell;
+  const ctx = out.getContext('2d', { willReadFrequently: true });
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, 0, out.width, out.height);
+  ctx.imageSmoothingQuality = 'high';
+
+  // Case par case : une transformation affine par case suit la courbure d'assez
+  // près, les cases étant petites devant le rayon de courbure.
+  for (let r = 0; r < R; r++) {
+    for (let c = 0; c < C; c++) {
+      const A = node(mesh, r, c);
+      const B = node(mesh, r, c + 1);
+      const E = node(mesh, r + 1, c);
+      const m11 = (B.x - A.x) / cell;
+      const m21 = (B.y - A.y) / cell;
+      const m12 = (E.x - A.x) / cell;
+      const m22 = (E.y - A.y) / cell;
+      const det = m11 * m22 - m12 * m21;
+      if (!det) continue;
+      const i11 = m22 / det;
+      const i12 = -m12 / det;
+      const i21 = -m21 / det;
+      const i22 = m11 / det;
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(c * cell, r * cell, cell, cell);
+      ctx.clip();
+      ctx.setTransform(
+        i11, i21, i12, i22,
+        c * cell - (i11 * A.x + i12 * A.y),
+        r * cell - (i21 * A.x + i22 * A.y)
+      );
+      ctx.drawImage(photo, 0, 0);
+      ctx.restore();
+    }
+  }
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+
+  /** Ramène un point de l'image aplatie vers la photo d'origine. */
+  const toSource = (x, y) => {
+    const c = Math.min(C - 1, Math.max(0, Math.floor(x / cell)));
+    const r = Math.min(R - 1, Math.max(0, Math.floor(y / cell)));
+    return cellPoint(mesh, r, c, x / cell - c, y / cell - r);
+  };
+  return { canvas: out, cell, rows: R, cols: C, toSource };
 }
 
 /** Coin (i, j) du maillage. */
