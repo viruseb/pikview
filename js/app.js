@@ -1,0 +1,652 @@
+import * as camera from './camera.js';
+import * as vision from './vision.js';
+import * as ocr from './ocr.js';
+import * as overlay from './overlay.js';
+
+const $ = (id) => document.getElementById(id);
+
+const el = {
+  screens: {
+    capture: $('screen-capture'),
+    review: $('screen-review'),
+    result: $('screen-result'),
+  },
+  video: $('video'),
+  cameraError: $('camera-error'),
+  fileInput: $('file-input'),
+  detectCanvas: $('detect-canvas'),
+  resultCanvas: $('result-canvas'),
+  rowClues: $('row-clues'),
+  colClues: $('col-clues'),
+  rowsSum: $('rows-sum'),
+  colsSum: $('cols-sum'),
+  sumStatus: $('sum-status'),
+  resultStatus: $('result-status'),
+  inRows: $('in-rows'),
+  inCols: $('in-cols'),
+  busy: $('busy'),
+  busyText: $('busy-text'),
+  busyBar: $('busy-bar'),
+  opacity: $('in-opacity'),
+  chkPhoto: $('chk-photo'),
+  chkAdjust: $('chk-adjust'),
+};
+
+const state = {
+  photo: null,        // canvas redressé, référentiel de toutes les coordonnées
+  mesh: null,         // maillage détecté (polylignes + nœuds)
+  split: null,        // { sc, sr } : largeur du bloc d'indices gauche / haut
+  rows: 0,
+  cols: 0,
+  rowClues: [],
+  colClues: [],
+  doubt: { rows: new Set(), cols: new Set() },
+  quad: null,         // 4 coins ajustés à la main, référentiel photo
+  useQuad: false,     // true dès que l'utilisateur déplace un coin
+  solution: null,
+};
+
+/** Projection (u, v) → pixel de la photo, pour la grille de jeu. */
+function currentMapper() {
+  if (!state.useQuad && state.mesh && state.split) {
+    return overlay.meshMapper(state.mesh, state.split.sr, state.split.sc, state.rows, state.cols);
+  }
+  return overlay.quadMapper(state.quad);
+}
+
+let cancelled = false;
+let solverWorker = null;
+
+/* ------------------------------------------------------------------ écrans */
+
+function show(name) {
+  for (const [key, node] of Object.entries(el.screens)) {
+    node.classList.toggle('active', key === name);
+  }
+  window.scrollTo(0, 0);
+  if (name === 'capture') startCamera();
+  else camera.stop();
+}
+
+function busy(text, progress) {
+  el.busy.hidden = false;
+  el.busyText.textContent = text;
+  el.busyBar.style.width = progress == null ? '0%' : `${Math.round(progress * 100)}%`;
+}
+
+function idle() {
+  el.busy.hidden = true;
+}
+
+/* ------------------------------------------------------------------ caméra */
+
+async function startCamera() {
+  el.cameraError.hidden = true;
+  if (!camera.isSupported()) {
+    el.cameraError.hidden = false;
+    el.cameraError.textContent =
+      "La caméra n'est pas accessible sur cet appareil. Utilisez « Galerie » pour choisir une photo.";
+    return;
+  }
+  try {
+    await camera.start(el.video);
+    $('btn-torch').hidden = !camera.torchSupported();
+  } catch (err) {
+    el.cameraError.hidden = false;
+    el.cameraError.textContent =
+      err && err.name === 'NotAllowedError'
+        ? "Accès à la caméra refusé. Autorisez-le dans les réglages du navigateur, ou utilisez « Galerie »."
+        : `Caméra indisponible (${err && err.name ? err.name : 'erreur'}). Utilisez « Galerie ».`;
+  }
+}
+
+/* ----------------------------------------------------------------- analyse */
+
+async function analyze(sourceCanvas) {
+  cancelled = false;
+  busy('Redressement de l’image…', 0.05);
+  await nextFrame();
+
+  let work = sourceCanvas;
+  let { gray, w, h } = vision.toGray(work);
+  let ink = vision.adaptiveThreshold(gray, w, h, Math.max(8, Math.round(Math.min(w, h) / 45)), 9);
+
+  const angle = vision.estimateSkew(ink, w, h);
+  if (Math.abs(angle) > 0.0015) {
+    work = vision.rotateCanvas(work, -angle);
+    ({ gray, w, h } = vision.toGray(work));
+    ink = vision.adaptiveThreshold(gray, w, h, Math.max(8, Math.round(Math.min(w, h) / 45)), 9);
+  }
+  state.photo = work;
+
+  busy('Détection du quadrillage…', 0.15);
+  await nextFrame();
+  const mesh = vision.detectMesh(ink, w, h);
+  if (!mesh || mesh.cols < 5 || mesh.rows < 5) {
+    idle();
+    alert(
+      "Quadrillage introuvable. Reprenez la photo bien à plat, avec un bon éclairage " +
+      'et toute la grille dans le cadre — ou utilisez la saisie manuelle.'
+    );
+    return false;
+  }
+  state.mesh = mesh;
+
+  const dens = vision.cellDensities(ink, w, h, mesh);
+  const split = vision.findSplit(dens, mesh.rows, mesh.cols);
+  if (!split) {
+    idle();
+    alert('Impossible de distinguer les indices de la grille de jeu. Essayez la saisie manuelle.');
+    return false;
+  }
+  state.split = split;
+  state.cols = mesh.cols - split.sc;
+  state.rows = mesh.rows - split.sr;
+  state.quad = overlay.quadFromMesh(mesh, split.sr, split.sc);
+  state.useQuad = false;
+
+  drawDetection();
+
+  // Seuil « case non vide » : moitié de la densité moyenne des cases encrées.
+  const clueDens = [];
+  for (let r = 0; r < mesh.rows; r++) {
+    for (let c = 0; c < mesh.cols; c++) {
+      const inTop = r < split.sr && c >= split.sc;
+      const inLeft = r >= split.sr && c < split.sc;
+      if (inTop || inLeft) clueDens.push(dens[r * mesh.cols + c]);
+    }
+  }
+  clueDens.sort((a, b) => b - a);
+  const strong = clueDens.slice(0, Math.max(1, Math.round(clueDens.length * 0.35)));
+  const inkThreshold = Math.max(
+    0.012,
+    (strong.reduce((a, b) => a + b, 0) / strong.length) * 0.38
+  );
+
+  const rowCells = [];
+  for (let r = 0; r < state.rows; r++) {
+    const cells = [];
+    for (let c = 0; c < split.sc; c++) {
+      if (dens[(split.sr + r) * mesh.cols + c] >= inkThreshold) cells.push({ r: split.sr + r, c });
+    }
+    rowCells.push(cells);
+  }
+  const colCells = [];
+  for (let c = 0; c < state.cols; c++) {
+    const cells = [];
+    for (let r = 0; r < split.sr; r++) {
+      if (dens[r * mesh.cols + split.sc + c] >= inkThreshold) cells.push({ r, c: split.sc + c });
+    }
+    colCells.push(cells);
+  }
+
+  state.rowClues = rowCells.map(() => []);
+  state.colClues = colCells.map(() => []);
+  state.doubt.rows = new Set();
+  state.doubt.cols = new Set();
+
+  const total = rowCells.length + colCells.length;
+  let done = 0;
+  let worker = null;
+  try {
+    busy('Chargement du moteur de lecture…', 0.2);
+    worker = await ocr.getWorker((m) => {
+      if (m.status && m.status.includes('loading')) {
+        busy('Chargement du moteur de lecture…', 0.2 + (m.progress || 0) * 0.1);
+      }
+    });
+  } catch (err) {
+    idle();
+    buildEditor();
+    show('review');
+    const reason = (err && err.message) || 'Moteur de reconnaissance indisponible.';
+    alert(
+      `${reason}\n\nLes indices n'ont pas pu être lus automatiquement : ` +
+      'saisissez-les à la main ci-dessous. La grille détectée reste utilisée pour la superposition.'
+    );
+    return true;
+  }
+
+  const readGroup = async (groups, out, doubt, label, lineLength) => {
+    for (let i = 0; i < groups.length; i++) {
+      if (cancelled) return;
+      const cells = groups[i];
+      if (!cells.length) { out[i] = []; doubt.add(i); done++; continue; }
+      const strip = vision.composeStrip(state.photo, mesh, cells);
+      const read = strip.slots.length
+        ? await ocr.readStrip(worker, strip)
+        : { values: [], confidence: 0 };
+      const clues = read.values.filter((v) => v !== null);
+      out[i] = clues;
+      // Une ligne est douteuse si une case n'a rien donné, si l'OCR hésite, ou
+      // si les indices lus ne peuvent tout simplement pas tenir dans la ligne.
+      const minLen = clues.reduce((a, b) => a + b, 0) + Math.max(0, clues.length - 1);
+      if (
+        !read.values.length ||
+        read.values.some((v) => v === null) ||
+        clues.some((v) => v > lineLength) ||
+        minLen > lineLength ||
+        read.minConfidence < 85
+      ) {
+        doubt.add(i);
+      }
+      done++;
+      busy(`Lecture des indices ${label} ${i + 1}/${groups.length}…`, 0.3 + (done / total) * 0.68);
+      if (i % 3 === 0) await nextFrame();
+    }
+  };
+
+  await readGroup(rowCells, state.rowClues, state.doubt.rows, 'de lignes', state.cols);
+  await readGroup(colCells, state.colClues, state.doubt.cols, 'de colonnes', state.rows);
+
+  idle();
+  if (cancelled) return false;
+  buildEditor();
+  show('review');
+  return true;
+}
+
+function nextFrame() {
+  return new Promise((r) => requestAnimationFrame(() => r()));
+}
+
+/* ----------------------------------------------- aperçu de la détection */
+
+function drawDetection() {
+  const { photo, mesh, split } = state;
+  const canvas = el.detectCanvas;
+  if (!photo || !mesh) { canvas.width = canvas.height = 0; return; }
+  const maxW = Math.min(window.innerWidth - 16, 900);
+  const scale = Math.min(1, maxW / photo.width);
+  canvas.width = Math.round(photo.width * scale);
+  canvas.height = Math.round(photo.height * scale);
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(photo, 0, 0, canvas.width, canvas.height);
+  const R = mesh.hLines.length;
+  const C = mesh.vLines.length;
+  const P = (i, j) => {
+    const p = vision.node(mesh, i, j);
+    return { x: p.x * scale, y: p.y * scale };
+  };
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = 'rgba(76,141,255,0.5)';
+  for (let i = 0; i < R; i++) {
+    ctx.beginPath();
+    for (let j = 0; j < C; j++) { const p = P(i, j); j ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y); }
+    ctx.stroke();
+  }
+  for (let j = 0; j < C; j++) {
+    ctx.beginPath();
+    for (let i = 0; i < R; i++) { const p = P(i, j); i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y); }
+    ctx.stroke();
+  }
+  if (split) {
+    ctx.strokeStyle = '#3ddc84';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    const corners = [P(split.sr, split.sc), P(split.sr, C - 1), P(R - 1, C - 1), P(R - 1, split.sc)];
+    ctx.moveTo(corners[0].x, corners[0].y);
+    for (let k = 1; k < 4; k++) ctx.lineTo(corners[k].x, corners[k].y);
+    ctx.closePath();
+    ctx.stroke();
+  }
+}
+
+/* --------------------------------------------------- éditeur d'indices */
+
+function parseClues(text) {
+  return text
+    .split(/[^0-9]+/)
+    .filter(Boolean)
+    .map((n) => parseInt(n, 10))
+    .filter((n) => n > 0);
+}
+
+function buildEditor() {
+  el.inRows.value = state.rows;
+  el.inCols.value = state.cols;
+  renderClueList(el.rowClues, state.rowClues, 'L', state.doubt.rows, (i, v) => {
+    state.rowClues[i] = v;
+  });
+  renderClueList(el.colClues, state.colClues, 'C', state.doubt.cols, (i, v) => {
+    state.colClues[i] = v;
+  });
+  updateSums();
+}
+
+function renderClueList(container, clues, prefix, doubtSet, onChange) {
+  container.textContent = '';
+  clues.forEach((line, i) => {
+    const wrap = document.createElement('div');
+    wrap.className = 'clue' + (doubtSet.has(i) ? ' doubt' : '');
+    const label = document.createElement('span');
+    label.textContent = `${prefix}${i + 1}`;
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.inputMode = 'numeric';
+    input.autocomplete = 'off';
+    input.value = line.join(' ');
+    input.addEventListener('input', () => {
+      onChange(i, parseClues(input.value));
+      wrap.classList.remove('doubt');
+      doubtSet.delete(i);
+      updateSums();
+    });
+    wrap.append(label, input);
+    container.append(wrap);
+  });
+}
+
+function sumOf(clues) {
+  return clues.reduce((a, line) => a + line.reduce((x, y) => x + y, 0), 0);
+}
+
+function updateSums() {
+  const sr = sumOf(state.rowClues);
+  const sc = sumOf(state.colClues);
+  el.rowsSum.textContent = `(total ${sr})`;
+  el.colsSum.textContent = `(total ${sc})`;
+  const doubts = state.doubt.rows.size + state.doubt.cols.size;
+  const bits = [];
+  if (sr === 0 && sc === 0) bits.push('Saisissez les indices de chaque ligne et de chaque colonne.');
+  else if (sr === sc) bits.push(`Sommes cohérentes : ${sr} cases à noircir.`);
+  else bits.push(`Sommes différentes : ${sr} (lignes) contre ${sc} (colonnes) — il reste une erreur.`);
+  if (doubts) bits.push(`${doubts} ligne(s) à vérifier (surlignées).`);
+  el.sumStatus.textContent = bits.join(' ');
+  el.sumStatus.className =
+    'status ' + (sr === 0 ? 'warn' : sr === sc ? (doubts ? 'warn' : 'ok') : 'bad');
+}
+
+function resizePuzzle(rows, cols) {
+  const fit = (arr, n) => {
+    const out = arr.slice(0, n);
+    while (out.length < n) out.push([]);
+    return out;
+  };
+  state.rows = rows;
+  state.cols = cols;
+  state.rowClues = fit(state.rowClues, rows);
+  state.colClues = fit(state.colClues, cols);
+  state.doubt.rows = new Set([...state.doubt.rows].filter((i) => i < rows));
+  state.doubt.cols = new Set([...state.doubt.cols].filter((i) => i < cols));
+  buildEditor();
+}
+
+/* ------------------------------------------------------------- résolution */
+
+function solve() {
+  if (!state.rows || !state.cols) return;
+  if (sumOf(state.rowClues) === 0 || sumOf(state.colClues) === 0) {
+    alert('Aucun indice saisi : remplissez au moins les lignes et les colonnes non vides.');
+    return;
+  }
+  if (solverWorker) solverWorker.terminate();
+  solverWorker = new Worker(new URL('./solver-worker.js', import.meta.url), { type: 'module' });
+  busy('Résolution…', 0.1);
+
+  solverWorker.onmessage = (e) => {
+    const msg = e.data;
+    if (msg.type === 'progress') {
+      busy(`Résolution… (${msg.nodes} hypothèses)`, Math.min(0.95, 0.1 + msg.nodes / 4000));
+      return;
+    }
+    idle();
+    solverWorker.terminate();
+    solverWorker = null;
+    if (msg.type === 'error') {
+      alert(`Erreur du solveur : ${msg.message}`);
+      return;
+    }
+    handleResult(msg.result);
+  };
+
+  solverWorker.postMessage({
+    rowClues: state.rowClues,
+    colClues: state.colClues,
+    options: { timeLimitMs: 30000, uniqueCheckMs: 4000, maxSolutions: 2 },
+  });
+}
+
+function handleResult(result) {
+  if (result.status === 'invalid' || result.status === 'contradiction') {
+    state.solution = result.partial || null;
+    if (!state.solution) {
+      alert(`${result.message}\n\nVérifiez les indices surlignés.`);
+      return;
+    }
+  }
+  if (result.status === 'timeout' && !result.grid) {
+    state.solution = result.partial || null;
+    if (!state.solution) {
+      alert('Temps de calcul dépassé sans solution. Vérifiez les indices.');
+      return;
+    }
+  }
+  if (result.grid) state.solution = result.grid;
+  state.rows = result.rows ?? state.rows;
+  state.cols = result.cols ?? state.cols;
+
+  const messages = {
+    solved: result.uniquenessVerified
+      ? 'Solution unique trouvée.'
+      : 'Solution trouvée (unicité non vérifiée dans le temps imparti).',
+    ambiguous: 'Plusieurs solutions possibles : une erreur de lecture est probable. Une solution est affichée.',
+    contradiction: 'Indices contradictoires — seules les déductions certaines sont affichées.',
+    timeout: 'Temps dépassé — seules les déductions certaines sont affichées.',
+    invalid: result.message,
+  };
+  el.resultStatus.textContent = messages[result.status] || result.message || '';
+  el.resultStatus.className =
+    'status ' + (result.status === 'solved' ? 'ok' : result.status === 'ambiguous' ? 'warn' : 'bad');
+
+  if (!state.quad) {
+    // Saisie manuelle sans photo : on invente un cadre pour l'affichage.
+    const size = 600;
+    state.quad = [
+      { x: 0, y: 0 },
+      { x: size, y: 0 },
+      { x: size, y: (size * state.rows) / state.cols },
+      { x: 0, y: (size * state.rows) / state.cols },
+    ];
+    state.useQuad = true;
+    el.chkPhoto.checked = false;
+    el.chkPhoto.disabled = !state.photo;
+  }
+  show('result');
+  drawResult();
+}
+
+/* ------------------------------------------------------- rendu du résultat */
+
+function drawResult() {
+  const canvas = el.resultCanvas;
+  const usePhoto = el.chkPhoto.checked && state.photo;
+  if (usePhoto) {
+    const maxW = Math.min(window.innerWidth - 16, 1000);
+    const scale = Math.min(1, maxW / state.photo.width);
+    canvas.width = Math.round(state.photo.width * scale);
+    canvas.height = Math.round(state.photo.height * scale);
+    overlay.renderOverlay({
+      ctx: canvas.getContext('2d'),
+      photo: state.photo,
+      map: currentMapper(),
+      grid: state.solution,
+      rows: state.rows,
+      cols: state.cols,
+      opacity: Number(el.opacity.value) / 100,
+      showHandles: el.chkAdjust.checked,
+    });
+  } else {
+    const cell = Math.max(8, Math.min(22, Math.floor((window.innerWidth - 60) / state.cols)));
+    overlay.renderCleanGrid(canvas, state.solution, state.rows, state.cols, cell);
+  }
+}
+
+/* ------------------------------------------ ajustement manuel des coins */
+
+function setupCornerDrag() {
+  const canvas = el.resultCanvas;
+  let dragging = -1;
+
+  const toPhoto = (ev) => {
+    const rect = canvas.getBoundingClientRect();
+    const x = ((ev.clientX - rect.left) / rect.width) * state.photo.width;
+    const y = ((ev.clientY - rect.top) / rect.height) * state.photo.height;
+    return { x, y };
+  };
+
+  canvas.addEventListener('pointerdown', (ev) => {
+    if (!el.chkAdjust.checked || !state.photo) return;
+    const p = toPhoto(ev);
+    let best = -1;
+    let bestD = Infinity;
+    state.quad.forEach((q, i) => {
+      const d = Math.hypot(q.x - p.x, q.y - p.y);
+      if (d < bestD) { bestD = d; best = i; }
+    });
+    const tolerance = state.photo.width * 0.12;
+    if (bestD > tolerance) return;
+    state.useQuad = true;
+    dragging = best;
+    canvas.setPointerCapture(ev.pointerId);
+    ev.preventDefault();
+  });
+
+  canvas.addEventListener('pointermove', (ev) => {
+    if (dragging < 0) return;
+    const p = toPhoto(ev);
+    state.quad[dragging] = {
+      x: Math.max(0, Math.min(state.photo.width, p.x)),
+      y: Math.max(0, Math.min(state.photo.height, p.y)),
+    };
+    drawResult();
+    ev.preventDefault();
+  });
+
+  const end = () => { dragging = -1; };
+  canvas.addEventListener('pointerup', end);
+  canvas.addEventListener('pointercancel', end);
+}
+
+/* ------------------------------------------------------------ évènements */
+
+$('btn-shoot').addEventListener('click', async () => {
+  if (!el.video.videoWidth) return;
+  const snap = vision.toWorkingCanvas(el.video, 1400);
+  camera.stop();
+  await analyze(snap);
+});
+
+el.fileInput.addEventListener('change', async () => {
+  const file = el.fileInput.files && el.fileInput.files[0];
+  if (!file) return;
+  busy('Ouverture de l’image…', 0.02);
+  const bitmap = await createImageBitmap(file);
+  const snap = vision.toWorkingCanvas(bitmap, 1400);
+  bitmap.close && bitmap.close();
+  el.fileInput.value = '';
+  await analyze(snap);
+});
+
+$('btn-flip').addEventListener('click', () => camera.flip(el.video).catch(() => {}));
+
+let torchOn = false;
+$('btn-torch').addEventListener('click', async () => {
+  torchOn = !torchOn;
+  const ok = await camera.setTorch(torchOn);
+  if (!ok) torchOn = false;
+  $('btn-torch').textContent = torchOn ? 'Lampe ✓' : 'Lampe';
+});
+
+$('btn-manual').addEventListener('click', () => {
+  const cols = parseInt(prompt('Nombre de colonnes ?', state.cols || 20), 10);
+  if (!cols || cols < 1 || cols > 80) return;
+  const rows = parseInt(prompt('Nombre de lignes ?', state.rows || 20), 10);
+  if (!rows || rows < 1 || rows > 80) return;
+  camera.stop();
+  state.photo = null;
+  state.mesh = null;
+  state.split = null;
+  state.quad = null;
+  state.useQuad = false;
+  state.rowClues = Array.from({ length: rows }, () => []);
+  state.colClues = Array.from({ length: cols }, () => []);
+  state.doubt.rows = new Set();
+  state.doubt.cols = new Set();
+  state.rows = rows;
+  state.cols = cols;
+  el.detectCanvas.width = el.detectCanvas.height = 0;
+  buildEditor();
+  show('review');
+});
+
+$('btn-resize').addEventListener('click', () => {
+  const rows = parseInt(el.inRows.value, 10);
+  const cols = parseInt(el.inCols.value, 10);
+  if (!rows || !cols || rows < 1 || cols < 1 || rows > 80 || cols > 80) return;
+  resizePuzzle(rows, cols);
+});
+
+$('btn-back-capture').addEventListener('click', () => show('capture'));
+$('btn-solve').addEventListener('click', solve);
+$('btn-back-review').addEventListener('click', () => show('review'));
+$('btn-restart').addEventListener('click', () => {
+  state.solution = null;
+  show('capture');
+});
+
+$('btn-cancel').addEventListener('click', () => {
+  cancelled = true;
+  if (solverWorker) { solverWorker.terminate(); solverWorker = null; }
+  idle();
+});
+
+el.opacity.addEventListener('input', drawResult);
+el.chkPhoto.addEventListener('change', drawResult);
+el.chkAdjust.addEventListener('change', drawResult);
+
+$('btn-download').addEventListener('click', () => {
+  el.resultCanvas.toBlob((blob) => {
+    if (!blob) return;
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'nonogramme-solution.png';
+    document.body.append(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+  }, 'image/png');
+});
+
+$('btn-help').addEventListener('click', () => $('help').showModal());
+
+window.addEventListener('resize', () => {
+  if (el.screens.review.classList.contains('active')) drawDetection();
+  if (el.screens.result.classList.contains('active') && state.solution) drawResult();
+});
+
+/* ------------------------------------------------------ installation PWA */
+
+let deferredPrompt = null;
+window.addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault();
+  deferredPrompt = e;
+  $('btn-install').hidden = false;
+});
+$('btn-install').addEventListener('click', async () => {
+  if (!deferredPrompt) return;
+  deferredPrompt.prompt();
+  await deferredPrompt.userChoice;
+  deferredPrompt = null;
+  $('btn-install').hidden = true;
+});
+
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register(new URL('../sw.js', import.meta.url)).catch(() => {});
+  });
+}
+
+setupCornerDrag();
+show('capture');

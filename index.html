@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Pikview — solveur de nonogramme</title>
+<meta name="description" content="Photographiez une grille de nonogramme, l'application la lit, la résout et affiche la solution en superposition.">
+<meta name="theme-color" content="#10131a">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<header class="topbar">
+  <h1>Pikview</h1>
+  <div class="topbar-actions">
+    <button id="btn-install" class="ghost" hidden>Installer</button>
+    <button id="btn-help" class="ghost" aria-label="Aide">?</button>
+  </div>
+</header>
+
+<!-- ÉCRAN 1 : capture -->
+<section id="screen-capture" class="screen active">
+  <div class="viewport">
+    <video id="video" playsinline muted autoplay></video>
+    <div class="guide"><span>Cadrez toute la grille,<br>indices compris</span></div>
+    <p id="camera-error" class="error" hidden></p>
+  </div>
+  <div class="toolbar">
+    <label class="btn secondary file">
+      Galerie
+      <input id="file-input" type="file" accept="image/*" hidden>
+    </label>
+    <button id="btn-shoot" class="btn shutter" aria-label="Prendre la photo"></button>
+    <button id="btn-flip" class="btn secondary">Objectif</button>
+  </div>
+  <div class="toolbar sub">
+    <button id="btn-torch" class="btn tiny" hidden>Lampe</button>
+    <button id="btn-manual" class="btn tiny">Saisie manuelle</button>
+  </div>
+</section>
+
+<!-- ÉCRAN 2 : vérification des indices -->
+<section id="screen-review" class="screen">
+  <div class="preview-wrap">
+    <canvas id="detect-canvas"></canvas>
+  </div>
+
+  <div class="panel">
+    <div class="row">
+      <label>Colonnes <input id="in-cols" type="number" min="1" max="80" inputmode="numeric"></label>
+      <label>Lignes <input id="in-rows" type="number" min="1" max="80" inputmode="numeric"></label>
+      <button id="btn-resize" class="btn tiny">Appliquer</button>
+    </div>
+    <p id="sum-status" class="status"></p>
+    <details class="hint">
+      <summary>L'OCR se trompe souvent : corrigez ici</summary>
+      <p>Chaque champ contient les indices d'une ligne ou d'une colonne, séparés
+      par des espaces (par exemple <code>2 2 1 2 1 2 1</code>). Les champs
+      surlignés sont ceux dont la lecture est douteuse. La somme des indices de
+      lignes doit être égale à celle des colonnes.</p>
+    </details>
+
+    <h2>Lignes <small id="rows-sum"></small></h2>
+    <div id="row-clues" class="clue-list"></div>
+
+    <h2>Colonnes <small id="cols-sum"></small></h2>
+    <div id="col-clues" class="clue-list"></div>
+  </div>
+
+  <div class="toolbar sticky">
+    <button id="btn-back-capture" class="btn secondary">Reprendre</button>
+    <button id="btn-solve" class="btn primary">Résoudre</button>
+  </div>
+</section>
+
+<!-- ÉCRAN 3 : solution -->
+<section id="screen-result" class="screen">
+  <div class="preview-wrap">
+    <canvas id="result-canvas"></canvas>
+  </div>
+  <p id="result-status" class="status"></p>
+  <div class="panel">
+    <div class="row wrap">
+      <label class="switch"><input id="chk-photo" type="checkbox" checked> Sur la photo</label>
+      <label class="switch"><input id="chk-adjust" type="checkbox"> Ajuster les coins</label>
+    </div>
+    <label class="slider">Opacité
+      <input id="in-opacity" type="range" min="20" max="100" value="75">
+    </label>
+    <div class="row wrap">
+      <button id="btn-download" class="btn tiny">Enregistrer l'image</button>
+      <button id="btn-back-review" class="btn tiny">Corriger les indices</button>
+      <button id="btn-restart" class="btn tiny">Nouvelle grille</button>
+    </div>
+  </div>
+</section>
+
+<!-- Progression -->
+<div id="busy" class="busy" hidden>
+  <div class="busy-box">
+    <div class="spinner"></div>
+    <p id="busy-text">Analyse…</p>
+    <div class="bar"><div id="busy-bar"></div></div>
+    <button id="btn-cancel" class="btn tiny">Annuler</button>
+  </div>
+</div>
+
+<!-- Aide -->
+<dialog id="help">
+  <h2>Comment ça marche</h2>
+  <ol>
+    <li>Photographiez la grille bien à plat, en cadrant les indices du haut et de gauche.</li>
+    <li>L'application détecte le quadrillage et lit les chiffres.</li>
+    <li><strong>Vérifiez les indices</strong> — la lecture automatique se trompe régulièrement.</li>
+    <li>La solution s'affiche en superposition sur votre photo.</li>
+  </ol>
+  <p>Le premier usage télécharge le moteur de reconnaissance de caractères
+  (environ 5 Mo). Ensuite, tout fonctionne hors ligne — la saisie manuelle et
+  le solveur n'ont jamais besoin du réseau.</p>
+  <p>Aucune image ne quitte votre téléphone : tout le traitement est local.</p>
+  <form method="dialog"><button class="btn primary">Fermer</button></form>
+</dialog>
+
+<script type="module" src="js/app.js"></script>
+</body>
+</html>
