@@ -158,11 +158,11 @@ function median(arr) {
  * @param {boolean} horizontal true pour les traits horizontaux (bandes verticales)
  * @returns {{centers:number[], peaks:number[][]}}
  */
-function stripPeaks(ink, w, h, horizontal, strips) {
+function stripPeaks(ink, w, h, horizontal, strips, runFactor) {
   const along = horizontal ? w : h;   // direction du trait
   const across = horizontal ? h : w;  // direction de la projection
   const stripW = along / strips;
-  const minRun = Math.max(10, stripW * 0.7);
+  const minRun = Math.max(10, stripW * runFactor);
   const at = horizontal
     ? (pos, cr) => (cr >= 0 && cr < across ? ink[cr * w + pos] : 0)
     : (pos, cr) => (cr >= 0 && cr < across ? ink[pos * w + cr] : 0);
@@ -203,16 +203,22 @@ function stripPeaks(ink, w, h, horizontal, strips) {
       if (!best || score > best.score) best = { score, proj };
     }
 
+    // Le seuil ne discrimine rien de plus que la longueur minimale déjà
+    // exigée — la projection ne cumule que des segments qui l'atteignent, elle
+    // vaut donc zéro ou davantage. La condition est écrite en négatif à
+    // dessein : une valeur non comparable doit faire avancer l'indice, faute
+    // de quoi la boucle tourne sans fin.
     const threshold = minRun * 0.85;
     const found = [];
     let i = 0;
     while (i < across) {
-      if (best.proj[i] < threshold) { i++; continue; }
+      if (!(best.proj[i] >= threshold)) { i++; continue; }
       let j = i;
       let sum = 0;
       let wsum = 0;
       while (j < across && best.proj[j] >= threshold) { sum += best.proj[j]; wsum += best.proj[j] * j; j++; }
-      found.push(wsum / sum);
+      if (j === i) { i++; continue; }
+      if (sum > 0) found.push(wsum / sum);
       i = j;
     }
     peaks.push(found);
@@ -291,13 +297,20 @@ function meanOf(values) {
 
 /**
  * Détecte le maillage complet du tableau.
+ * Le nombre de bandes compte, et pas leur coût : le travail total vaut la
+ * surface de l'image par le nombre de pentes essayées, quelle que soit la
+ * découpe. Des bandes étroites exigent des segments plus courts, ce qui
+ * rattrape les traits que les chiffres d'un bloc d'indices dense
+ * interrompent — sur les grilles serrées, passer de douze à vingt bandes
+ * double presque le nombre de traits retrouvés.
+ *
  * @returns {null|{hLines:Float64Array[], vLines:Float64Array[], sampleX:number[],
  *                 sampleY:number[], rows:number, cols:number,
  *                 pitchX:number, pitchY:number, nodes:Float64Array}}
  */
-export function detectMesh(ink, w, h, strips = 12) {
-  const hRaw = stripPeaks(ink, w, h, true, strips);
-  const vRaw = stripPeaks(ink, w, h, false, strips);
+export function detectMesh(ink, w, h, strips = 20, runFactor = 0.45) {
+  const hRaw = stripPeaks(ink, w, h, true, strips, runFactor);
+  const vRaw = stripPeaks(ink, w, h, false, strips, runFactor);
 
   const gaps = (list) => {
     const out = [];
