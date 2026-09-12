@@ -316,9 +316,33 @@ function solve() {
     alert('Aucun indice saisi : remplissez au moins les lignes et les colonnes non vides.');
     return;
   }
+  runSolver({}, (result) => {
+    if (result.grid && (result.status === 'solved' || result.status === 'ambiguous')) {
+      handleResult(result);
+      return;
+    }
+    // Les indices ne se tiennent pas : plutôt que de refuser, on reconstruit
+    // ce qui est démontrable en écartant les lignes fautives.
+    busy('Reconstruction partielle…', 0.5);
+    runSolver(
+      {
+        mode: 'partial',
+        options: {
+          timeLimitMs: 20000,
+          doubtRows: [...state.doubt.rows],
+          doubtCols: [...state.doubt.cols],
+        },
+      },
+      (partial) => handleResult(partial)
+    );
+  });
+}
+
+/** Lance le solveur dans son worker et rend la main au rappel. */
+function runSolver({ mode, options }, done) {
   if (solverWorker) solverWorker.terminate();
   solverWorker = new Worker(new URL('./solver-worker.js', import.meta.url), { type: 'module' });
-  busy('Résolution…', 0.1);
+  busy(mode === 'partial' ? 'Reconstruction partielle…' : 'Résolution…', 0.1);
 
   solverWorker.onmessage = (e) => {
     const msg = e.data;
@@ -333,17 +357,44 @@ function solve() {
       alert(`Erreur du solveur : ${msg.message}`);
       return;
     }
-    handleResult(msg.result);
+    done(msg.result);
   };
 
   solverWorker.postMessage({
     rowClues: state.rowClues,
     colClues: state.colClues,
-    options: { timeLimitMs: 30000, uniqueCheckMs: 4000, maxSolutions: 2 },
+    mode,
+    options: options || { timeLimitMs: 30000, uniqueCheckMs: 4000, maxSolutions: 2 },
   });
 }
 
 function handleResult(result) {
+  if (result.status === 'partial') {
+    if (!result.grid) {
+      alert('Les indices se contredisent et rien n\u2019a pu être reconstruit.');
+      return;
+    }
+    state.solution = result.grid;
+    state.rows = result.rows;
+    state.cols = result.cols;
+    const pct = Math.round((result.determined / result.total) * 100);
+    const écartées = [
+      result.relaxedRows.length ? `L${result.relaxedRows.map((i) => i + 1).join(', L')}` : '',
+      result.relaxedCols.length ? `C${result.relaxedCols.map((j) => j + 1).join(', C')}` : '',
+    ].filter(Boolean).join(' et ');
+
+    el.resultStatus.textContent = result.weak
+      ? `Reconstruction fragile : il a fallu écarter trop d\u2019indices (${écartées}). ` +
+        'L\u2019image ci-dessous respecte ce qui reste, mais ce n\u2019est probablement pas celle de la grille. ' +
+        'Corrigez les lignes surlignées, puis relancez.'
+      : `Reconstruction partielle : ${pct} % des cases sont déterminées` +
+        (écartées ? `, en écartant ${écartées}` : '') +
+        '. Les cases grises restent indéterminées.';
+    el.resultStatus.className = 'status ' + (result.weak ? 'bad' : 'warn');
+    showResult();
+    return;
+  }
+
   if (result.status === 'invalid' || result.status === 'contradiction') {
     state.solution = result.partial || null;
     if (!state.solution) {
@@ -374,9 +425,12 @@ function handleResult(result) {
   el.resultStatus.textContent = messages[result.status] || result.message || '';
   el.resultStatus.className =
     'status ' + (result.status === 'solved' ? 'ok' : result.status === 'ambiguous' ? 'warn' : 'bad');
+  showResult();
+}
 
+/** Prépare l'écran de résultat, en inventant un cadre si l'on n'a pas de photo. */
+function showResult() {
   if (!state.quad) {
-    // Saisie manuelle sans photo : on invente un cadre pour l'affichage.
     const size = 600;
     state.quad = [
       { x: 0, y: 0 },
