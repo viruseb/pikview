@@ -21,6 +21,15 @@ sur un serveur.
 5. Appuyez sur **Résoudre**. La solution s'affiche par-dessus la photo ; les
    quatre coins sont ajustables au doigt si le calage n'est pas parfait.
 
+Si les indices ne se tiennent pas — il suffit d'un « 1 » lu « 7 » — l'application
+ne refuse pas : elle écarte les lignes fautives et reconstruit ce qui reste
+démontrable. Un nonogramme est très surdéterminé (soixante contraintes pour
+huit cent soixante-quinze cases sur une grille de 25 × 35), si bien qu'une ou
+deux lignes perdues laissent le plus souvent l'image entière déductible. Les
+cases qu'aucune contrainte ne tranche restent grises plutôt que devinées, et
+l'application prévient quand il a fallu écarter tant d'indices que l'image
+n'est probablement plus celle de la grille.
+
 Le bouton **Saisie manuelle** permet d'entrer une grille sans photo — utile si
 la photo est trop abîmée, et parfaitement hors ligne.
 

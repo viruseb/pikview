@@ -1,6 +1,6 @@
 /** Rendu de la solution : superposition sur la photo, ou grille propre. */
 
-import { FILLED } from './solver.js';
+import { FILLED, UNKNOWN } from './solver.js';
 import { node } from './vision.js';
 
 /** Interpolation bilinéaire dans un quadrilatère [tl, tr, br, bl]. */
@@ -80,21 +80,34 @@ export function renderOverlay({
   }
 
   if (grid) {
+    const quad = (c, r) => {
+      const a = P(c / cols, r / rows);
+      const b = P((c + 1) / cols, r / rows);
+      const d = P((c + 1) / cols, (r + 1) / rows);
+      const e = P(c / cols, (r + 1) / rows);
+      ctx.beginPath();
+      ctx.moveTo(a.x, a.y);
+      ctx.lineTo(b.x, b.y);
+      ctx.lineTo(d.x, d.y);
+      ctx.lineTo(e.x, e.y);
+      ctx.closePath();
+    };
     ctx.globalAlpha = opacity;
     ctx.fillStyle = color;
     for (let r = 0; r < rows; r++) {
       for (let c = 0; c < cols; c++) {
         if (grid[r * cols + c] !== FILLED) continue;
-        const a = P(c / cols, r / rows);
-        const b = P((c + 1) / cols, r / rows);
-        const d = P((c + 1) / cols, (r + 1) / rows);
-        const e = P(c / cols, (r + 1) / rows);
-        ctx.beginPath();
-        ctx.moveTo(a.x, a.y);
-        ctx.lineTo(b.x, b.y);
-        ctx.lineTo(d.x, d.y);
-        ctx.lineTo(e.x, e.y);
-        ctx.closePath();
+        quad(c, r);
+        ctx.fill();
+      }
+    }
+    // Case non tranchée : elle se voit, sans se faire passer pour une réponse.
+    ctx.globalAlpha = opacity * 0.5;
+    ctx.fillStyle = '#9aa3b5';
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        if (grid[r * cols + c] !== UNKNOWN) continue;
+        quad(c, r);
         ctx.fill();
       }
     }
@@ -147,12 +160,13 @@ export function renderCleanGrid(canvas, grid, rows, cols, cell = 16) {
   const ctx = canvas.getContext('2d');
   ctx.fillStyle = '#fff';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
-  ctx.fillStyle = '#14213d';
   for (let r = 0; r < rows; r++) {
     for (let c = 0; c < cols; c++) {
-      if (grid[r * cols + c] === FILLED) {
-        ctx.fillRect(pad + c * cell, pad + r * cell, cell, cell);
-      }
+      const v = grid[r * cols + c];
+      if (v === FILLED) ctx.fillStyle = '#14213d';
+      else if (v === UNKNOWN) ctx.fillStyle = '#c9cedb';
+      else continue;
+      ctx.fillRect(pad + c * cell, pad + r * cell, cell, cell);
     }
   }
   ctx.strokeStyle = 'rgba(0,0,0,0.35)';

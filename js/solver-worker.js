@@ -1,13 +1,15 @@
 /* Worker dédié au solveur : garde l'interface fluide pendant la recherche. */
-import { solvePuzzle } from './solver.js';
+import { solvePuzzle, solvePartial } from './solver.js';
 
 self.onmessage = (e) => {
-  const { rowClues, colClues, options } = e.data;
+  const { rowClues, colClues, options, mode } = e.data;
   try {
-    const result = solvePuzzle(rowClues, colClues, {
-      ...options,
-      onProgress: (p) => self.postMessage({ type: 'progress', ...p }),
-    });
+    const result = mode === 'partial'
+      ? solvePartial(rowClues, colClues, options)
+      : solvePuzzle(rowClues, colClues, {
+        ...options,
+        onProgress: (p) => self.postMessage({ type: 'progress', ...p }),
+      });
     // Les Int8Array passent par structured clone sans souci.
     self.postMessage({ type: 'done', result });
   } catch (err) {
