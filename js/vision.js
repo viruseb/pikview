@@ -968,8 +968,16 @@ function binarizeCell(cell) {
     if (c.area < minArea) return false;
     const cw = c.x1 - c.x0 + 1;
     const ch = c.y1 - c.y0 + 1;
-    // Barre fine collée au bord : reste de quadrillage.
-    if (c.edge && (cw < w * 0.2 || ch < h * 0.2)) return false;
+    if (c.edge) {
+      // Barre fine collée au bord : reste de quadrillage.
+      if (cw < w * 0.2 || ch < h * 0.2) return false;
+      // Morceau nettement plus large que haut : bordure du tableau, épaisse
+      // là où le quadrillage est fin. Le critère de finesse seul la laissait
+      // passer, et elle se lisait comme un chiffre de plus. Aucun chiffre
+      // n'est deux fois plus large que haut ; l'inverse, si — « 1 » est
+      // étroit et haut — d'où un critère volontairement à sens unique.
+      if (cw > ch * 2) return false;
+    }
     // Trait traversant toute la case sur une largeur dérisoire.
     if (ch > h * 0.92 && cw < w * 0.22) return false;
     if (cw > w * 0.92 && ch < h * 0.22) return false;
